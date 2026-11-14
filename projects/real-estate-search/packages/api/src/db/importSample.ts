@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import {
   createPostgresDatabase,
   createTestDatabase,
-  insertOrBackfillListings,
+  insertListingsIdempotently,
   type AppDatabase,
 } from './client.js';
 import type { NewListingRecord } from './schema.js';
@@ -220,7 +220,7 @@ export async function importSampleListings(
     return 0;
   }
 
-  const inserted = await insertOrBackfillListings(db, recordsToInsert);
+  const inserted = await insertListingsIdempotently(db, recordsToInsert);
 
   return inserted.length;
 }

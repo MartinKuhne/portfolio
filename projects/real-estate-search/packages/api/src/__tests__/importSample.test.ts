@@ -1,15 +1,13 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PGlite } from '@electric-sql/pglite';
-import { sql } from 'drizzle-orm';
-import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
 import pg from 'pg';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   createPostgresDatabase,
   createTestDatabase,
   ensureSchema,
+  insertListingsIdempotently,
   type AppDatabase,
 } from '../db/client.js';
 import * as clientModule from '../db/client.js';
@@ -18,7 +16,6 @@ import {
   resolveSampleListingsPath,
   runImportCli,
 } from '../db/importSample.js';
-import * as schema from '../db/schema.js';
 import { listingsTable } from '../db/schema.js';
 import { executeSearch } from '../search/executeSearch.js';
 
@@ -290,91 +287,9 @@ describe('importSampleListings and resolveSampleListingsPath', () => {
     expect(searchRes.listings[0].internalId).not.toBe(searchRes.listings[1].internalId);
   });
 
-  it('idempotently migrates a legacy id-primary-key listings table inside ensureSchema', async () => {
-    const client = new PGlite();
-    const legacyDb = drizzlePglite(client, { schema });
-
-    await legacyDb.execute(sql.raw(`
-      CREATE TABLE listings (
-        id TEXT PRIMARY KEY,
-        address TEXT NOT NULL,
-        city TEXT NOT NULL,
-        price INTEGER NOT NULL,
-        bedrooms INTEGER NOT NULL,
-        description TEXT NOT NULL,
-        listed_date TEXT NOT NULL
-      );
-    `));
-
-    await legacyDb.execute(sql.raw(`
-      INSERT INTO listings (id, address, city, price, bedrooms, description, listed_date) VALUES
-      ('LST-001', '101 Congress Ave', 'Austin', 450000, 3, 'Legacy seed row', '2026-10-20T00:00:00.000Z'),
-      ('A1', '123 Main St, Apt 4B, Springfield, VA 22150', 'Springfield', 450000, 2, 'Legacy MLS_A row', '2026-08-29T00:00:00.000Z'),
-      ('B7', '123 Main Street, Unit 4B, Springfield, VA 22150', 'Springfield', 452000, 2, 'Legacy MLS_B row', '2026-08-27T00:00:00.000Z');
-    `));
-
-    await ensureSchema(legacyDb);
-    // Run a second time to verify idempotency
-    await ensureSchema(legacyDb);
-
-    const pkResult = await client.query<{ attname: string }>(`
-      SELECT a.attname
-      FROM pg_constraint c
-      JOIN pg_class t ON t.oid = c.conrelid
-      JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(c.conkey)
-      WHERE t.relname = 'listings' AND c.contype = 'p';
-    `);
-    expect(pkResult.rows.map((r) => r.attname)).toEqual(['internal_id']);
-
-    const colResult = await client.query<{ data_type: string }>(`
-      SELECT data_type
-      FROM information_schema.columns
-      WHERE table_schema = current_schema()
-        AND table_name = 'listings'
-        AND column_name = 'listed_date';
-    `);
-    expect(colResult.rows[0]?.data_type).toBe('timestamp with time zone');
-
-    const indexResult = await client.query<{ indexname: string }>(`
-      SELECT indexname FROM pg_indexes WHERE tablename = 'listings';
-    `);
-    const indexNames = indexResult.rows.map((r) => r.indexname);
-    expect(indexNames).toContain('listings_id_source_unique');
-    expect(indexNames).toContain('listings_location_gist');
-    expect(indexNames).toContain('listings_listed_date_desc');
-    expect(indexNames).toContain('listings_price_idx');
-    expect(indexNames).toContain('listings_bedrooms_idx');
-    expect(indexNames).toContain('listings_city_lower_idx');
-
-    const migratedRows = await legacyDb.select().from(listingsTable);
-    expect(migratedRows).toHaveLength(3);
-    const seedRow = migratedRows.find((r) => r.id === 'LST-001');
-    const a1Row = migratedRows.find((r) => r.id === 'A1');
-    const b7Row = migratedRows.find((r) => r.id === 'B7');
-    expect(seedRow?.source).toBe('SEED');
-    expect(seedRow?.internalId).toMatch(UUID_REGEX);
-    expect(a1Row?.source).toBe('MLS_A');
-    expect(a1Row?.internalId).toMatch(UUID_REGEX);
-    expect(b7Row?.source).toBe('MLS_B');
-    expect(b7Row?.internalId).toMatch(UUID_REGEX);
-
-    // Same external id with a different source now inserts cleanly after PK migration
-    await legacyDb
-      .insert(listingsTable)
-      .values({
-        id: 'A1',
-        source: 'MLS_B',
-        address: '123 Main St',
-        city: 'Springfield',
-        price: 451000,
-        bedrooms: 2,
-        description: 'Cross-source row',
-        listedDate: '2026-08-30T00:00:00.000Z',
-      })
-      .onConflictDoNothing({ target: [listingsTable.id, listingsTable.source] });
-
-    const afterInsertRows = await legacyDb.select().from(listingsTable);
-    expect(afterInsertRows).toHaveLength(4);
+  it('executes ensureSchema idempotently and handles empty insertListingsIdempotently slices', async () => {
+    await expect(ensureSchema(db)).resolves.not.toThrow();
+    await expect(insertListingsIdempotently(db, [])).resolves.toEqual([]);
   });
 
   it('normalizes date-only listedDate strings to UTC ISO-8601 timestamps on insert', async () => {

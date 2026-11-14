@@ -1,4 +1,4 @@
-import { insertOrBackfillListings, type AppDatabase } from './client.js';
+import { insertListingsIdempotently, type AppDatabase } from './client.js';
 import type { NewListingRecord } from './schema.js';
 
 export const SEED_LISTINGS: NewListingRecord[] = [
@@ -444,5 +444,5 @@ export const SEED_LISTINGS: NewListingRecord[] = [
 ];
 
 export async function seedDatabase(db: AppDatabase): Promise<void> {
-  await insertOrBackfillListings(db, SEED_LISTINGS);
+  await insertListingsIdempotently(db, SEED_LISTINGS);
 }

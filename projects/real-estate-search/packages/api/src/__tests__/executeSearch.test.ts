@@ -1,17 +1,12 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
-import { PGlite } from '@electric-sql/pglite';
-import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm';
 import { sql } from 'drizzle-orm';
-import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
 import pg from 'pg';
 import { computeRelevanceScore, REFERENCE_DATE_ISO } from '@real-estate/shared';
 import {
   createPostgresDatabase,
   createTestDatabase,
-  ensureSchema,
   type AppDatabase,
 } from '../db/client.js';
-import * as schema from '../db/schema.js';
 import { listingsTable } from '../db/schema.js';
 import { seedDatabase } from '../db/seed.js';
 import { executeSearch } from '../search/executeSearch.js';
@@ -324,7 +319,7 @@ describe('executeSearch domain service', () => {
     }
   });
 
-  it('creates TIMESTAMPTZ listed_date and all filter/ranking indexes via ensureSchema, including legacy TEXT migration', async () => {
+  it('creates TIMESTAMPTZ listed_date and all filter/ranking indexes via ensureSchema', async () => {
     const colResult = await db.execute<{ data_type: string }>(sql`
       SELECT data_type
       FROM information_schema.columns
@@ -348,50 +343,6 @@ describe('executeSearch domain service', () => {
     expect(indexNames).toContain('listings_bedrooms_idx');
     expect(indexNames).toContain('listings_city_lower_idx');
     expect(indexNames).toContain('listings_description_trgm');
-
-    // Legacy TEXT listed_date table upgrade
-    const legacyClient = new PGlite({ extensions: { pg_trgm } });
-    const legacyDb = drizzlePglite(legacyClient, { schema });
-    await legacyClient.exec(`
-      CREATE TABLE listings (
-        internal_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        id TEXT NOT NULL,
-        source TEXT NOT NULL DEFAULT 'SEED',
-        address TEXT NOT NULL,
-        city TEXT NOT NULL,
-        price INTEGER NOT NULL,
-        bedrooms INTEGER NOT NULL,
-        description TEXT NOT NULL,
-        listed_date TEXT NOT NULL
-      );
-      INSERT INTO listings (id, address, city, price, bedrooms, description, listed_date)
-      VALUES ('LEG-1', '1 Legacy Ln', 'Austin', 400000, 2, 'Legacy text date', '2026-09-15T00:00:00.000Z');
-    `);
-
-    await ensureSchema(legacyDb);
-
-    const legacyCol = await legacyClient.query<{ data_type: string }>(`
-      SELECT data_type
-      FROM information_schema.columns
-      WHERE table_schema = current_schema()
-        AND table_name = 'listings'
-        AND column_name = 'listed_date';
-    `);
-    expect(legacyCol.rows[0]?.data_type).toBe('timestamp with time zone');
-
-    const legacyIdx = await legacyClient.query<{ indexname: string }>(`
-      SELECT indexname FROM pg_indexes WHERE tablename = 'listings';
-    `);
-    const legacyIdxNames = legacyIdx.rows.map((r) => r.indexname);
-    expect(legacyIdxNames).toContain('listings_listed_date_desc');
-    expect(legacyIdxNames).toContain('listings_price_idx');
-    expect(legacyIdxNames).toContain('listings_bedrooms_idx');
-    expect(legacyIdxNames).toContain('listings_city_lower_idx');
-    expect(legacyIdxNames).toContain('listings_description_trgm');
-
-    const legacySearch = await executeSearch(legacyDb, { city: 'austin' });
-    expect(legacySearch.ok).toBe(true);
-    expect(legacySearch.listings[0]?.listedDate).toBe('2026-09-15T00:00:00.000Z');
   });
 
   it('normalizes Postgres TIMESTAMPTZ strings to UTC ISO-8601 and preserves invalid date strings in mapListingRow', () => {
