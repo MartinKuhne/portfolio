@@ -1,8 +1,16 @@
-import { context, SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
+import {
+  context,
+  SpanKind,
+  SpanStatusCode,
+  trace,
+  type Context,
+  type Span,
+} from '@opentelemetry/api';
 import {
   type Listing,
   type PaginationMeta,
   type RawSearchInput,
+  type SearchError,
   type SearchResponse,
   validateSearchInput,
 } from '@real-estate/shared';
@@ -62,6 +70,51 @@ type GraphqlSearchListingsResult =
       totalPages: number;
     };
 
+/** Builds a failed `SearchResponse` envelope with empty listings and null pagination. */
+function createErrorResponse(error: SearchError): SearchResponse {
+  return {
+    ok: false,
+    listings: [],
+    pagination: null,
+    error,
+  };
+}
+
+interface InternalFailureTelemetry {
+  uiSpan: Span;
+  httpSpan: Span;
+  httpCtx: Context;
+  message: string;
+  logEvent: string;
+  logAttributes: Record<string, string | number>;
+  exception?: Error;
+}
+
+/** Records span errors/exceptions and emits a trace-correlated UI error log for internal failures. */
+function recordInternalFailure({
+  uiSpan,
+  httpSpan,
+  httpCtx,
+  message,
+  logEvent,
+  logAttributes,
+  exception,
+}: InternalFailureTelemetry): SearchResponse {
+  if (exception) {
+    httpSpan.recordException(exception);
+    uiSpan.recordException(exception);
+  }
+  httpSpan.setStatus({ code: SpanStatusCode.ERROR, message });
+  uiSpan.setAttribute('search.ok', false);
+  uiSpan.setStatus({ code: SpanStatusCode.ERROR, message });
+  logUi('ERROR', logEvent, logAttributes, httpCtx);
+  return createErrorResponse({
+    code: 'INTERNAL_ERROR',
+    message,
+    field: null,
+  });
+}
+
 function mapGraphqlResultToSearchResponse(
   raw: GraphqlSearchListingsResult | null | undefined
 ): SearchResponse | null {
@@ -77,28 +130,18 @@ function mapGraphqlResultToSearchResponse(
         error: null,
       };
     case 'SearchValidationError':
-      return {
-        ok: false,
-        listings: [],
-        pagination: null,
-        error: {
-          code: 'VALIDATION_ERROR',
-          message: raw.message,
-          field: raw.field ?? null,
-        },
-      };
+      return createErrorResponse({
+        code: 'VALIDATION_ERROR',
+        message: raw.message,
+        field: raw.field ?? null,
+      });
     case 'SearchOutOfRangeError':
-      return {
-        ok: false,
-        listings: [],
-        pagination: null,
-        error: {
-          code: 'OUT_OF_RANGE',
-          message: raw.message,
-          field: raw.field ?? 'page',
-          totalPages: raw.totalPages,
-        },
-      };
+      return createErrorResponse({
+        code: 'OUT_OF_RANGE',
+        message: raw.message,
+        field: raw.field ?? 'page',
+        totalPages: raw.totalPages,
+      });
     default:
       return null;
   }
@@ -133,12 +176,7 @@ export async function fetchSearchListings(
       uiCtx
     );
     uiSpan.end();
-    return {
-      ok: false,
-      listings: [],
-      pagination: null,
-      error: validation.error,
-    };
+    return createErrorResponse(validation.error);
   }
 
   const httpSpan = tracer.startSpan(
@@ -187,102 +225,74 @@ export async function fetchSearchListings(
       errors?: Array<{ message?: string; extensions?: { code?: string } }>;
     };
     try {
-      json = (await response.json()) as {
-        data?: { searchListings?: GraphqlSearchListingsResult | null };
-        errors?: Array<{ message?: string; extensions?: { code?: string } }>;
-      };
+      json = (await response.json()) as typeof json;
     } catch (parseErr: unknown) {
-      const error = parseErr instanceof Error ? parseErr : new Error(String(parseErr));
-      const message = `Search service returned an unexpected response (HTTP ${response.status}).`;
-      httpSpan.recordException(error);
-      httpSpan.setStatus({ code: SpanStatusCode.ERROR, message });
-      uiSpan.recordException(error);
-      uiSpan.setAttribute('search.ok', false);
-      uiSpan.setStatus({ code: SpanStatusCode.ERROR, message });
-      logUi(
-        'ERROR',
-        'ui.search.invalid_response',
-        { 'http.response.status_code': response.status },
-        httpCtx
-      );
-      return {
-        ok: false,
-        listings: [],
-        pagination: null,
-        error: {
-          code: 'INTERNAL_ERROR',
-          message,
-          field: null,
-        },
-      };
+      const exception = parseErr instanceof Error ? parseErr : new Error(String(parseErr));
+      return recordInternalFailure({
+        uiSpan,
+        httpSpan,
+        httpCtx,
+        message: `Search service returned an unexpected response (HTTP ${response.status}).`,
+        logEvent: 'ui.search.invalid_response',
+        logAttributes: { 'http.response.status_code': response.status },
+        exception,
+      });
     }
 
     if (json.errors && json.errors.length > 0) {
       const message = json.errors[0]?.message || 'GraphQL query failed.';
-      httpSpan.setStatus({ code: SpanStatusCode.ERROR, message });
-      uiSpan.setAttribute('search.ok', false);
-      uiSpan.setStatus({ code: SpanStatusCode.ERROR, message });
-      logUi('ERROR', 'ui.search.graphql_errors', { 'error.message': message }, httpCtx);
-      return {
-        ok: false,
-        listings: [],
-        pagination: null,
-        error: {
-          code: 'INTERNAL_ERROR',
-          message,
-          field: null,
-        },
-      };
+      return recordInternalFailure({
+        uiSpan,
+        httpSpan,
+        httpCtx,
+        message,
+        logEvent: 'ui.search.graphql_errors',
+        logAttributes: { 'error.message': message },
+      });
     }
 
     const payload = mapGraphqlResultToSearchResponse(json.data?.searchListings);
-    if (payload) {
-      uiSpan.setAttribute('search.ok', payload.ok);
-      if (payload.ok) {
-        const totalResults = payload.pagination.totalResults;
-        uiSpan.setAttribute('search.totalResults', totalResults);
-        uiSpan.setAttribute('search.returnedCount', payload.listings.length);
-        logUi(
-          'INFO',
-          'ui.search.completed',
-          {
-            'search.totalResults': totalResults,
-            'search.returnedCount': payload.listings.length,
-          },
-          httpCtx
-        );
-      } else {
-        uiSpan.setAttribute('error.code', payload.error.code);
-        uiSpan.setStatus({ code: SpanStatusCode.ERROR, message: payload.error.message });
-        httpSpan.setStatus({ code: SpanStatusCode.ERROR, message: payload.error.message });
-        logUi(
-          'WARN',
-          'ui.search.server_error',
-          {
-            'error.code': payload.error.code,
-            'error.message': payload.error.message,
-          },
-          httpCtx
-        );
-      }
-      return payload;
+    if (!payload) {
+      const emptyMessage = 'No response data returned from search server.';
+      return recordInternalFailure({
+        uiSpan,
+        httpSpan,
+        httpCtx,
+        message: emptyMessage,
+        logEvent: 'ui.search.empty_response',
+        logAttributes: { 'error.message': emptyMessage },
+      });
     }
 
-    const emptyMessage = 'No response data returned from search server.';
-    httpSpan.setStatus({ code: SpanStatusCode.ERROR, message: emptyMessage });
-    uiSpan.setAttribute('search.ok', false);
-    uiSpan.setStatus({ code: SpanStatusCode.ERROR, message: emptyMessage });
-    logUi('ERROR', 'ui.search.empty_response', { 'error.message': emptyMessage }, httpCtx);
-    return {
-      ok: false,
-      listings: [],
-      pagination: null,
-      error: {
-        code: 'INTERNAL_ERROR',
-        message: emptyMessage,
-        field: null,
-      },
-    };
+    uiSpan.setAttribute('search.ok', payload.ok);
+    if (payload.ok) {
+      const totalResults = payload.pagination.totalResults;
+      uiSpan.setAttribute('search.totalResults', totalResults);
+      uiSpan.setAttribute('search.returnedCount', payload.listings.length);
+      logUi(
+        'INFO',
+        'ui.search.completed',
+        {
+          'search.totalResults': totalResults,
+          'search.returnedCount': payload.listings.length,
+        },
+        httpCtx
+      );
+    } else {
+      uiSpan.setAttribute('error.code', payload.error.code);
+      uiSpan.setStatus({ code: SpanStatusCode.ERROR, message: payload.error.message });
+      httpSpan.setStatus({ code: SpanStatusCode.ERROR, message: payload.error.message });
+      logUi(
+        'WARN',
+        'ui.search.server_error',
+        {
+          'error.code': payload.error.code,
+          'error.message': payload.error.message,
+        },
+        httpCtx
+      );
+    }
+    return payload;
   } catch (err: unknown) {
     if ((err as { name?: string })?.name === 'AbortError') {
       logUi('INFO', 'ui.search.request_aborted', {}, httpCtx);
@@ -290,24 +300,16 @@ export async function fetchSearchListings(
     }
 
     const message = err instanceof Error ? err.message : 'Network request failed.';
-    const error = err instanceof Error ? err : new Error(message);
-    httpSpan.recordException(error);
-    httpSpan.setStatus({ code: SpanStatusCode.ERROR, message });
-    uiSpan.recordException(error);
-    uiSpan.setAttribute('search.ok', false);
-    uiSpan.setStatus({ code: SpanStatusCode.ERROR, message });
-    logUi('ERROR', 'ui.search.network_error', { 'error.message': message }, httpCtx);
-
-    return {
-      ok: false,
-      listings: [],
-      pagination: null,
-      error: {
-        code: 'INTERNAL_ERROR',
-        message,
-        field: null,
-      },
-    };
+    const exception = err instanceof Error ? err : new Error(message);
+    return recordInternalFailure({
+      uiSpan,
+      httpSpan,
+      httpCtx,
+      message,
+      logEvent: 'ui.search.network_error',
+      logAttributes: { 'error.message': message },
+      exception,
+    });
   } finally {
     httpSpan.end();
     uiSpan.end();
