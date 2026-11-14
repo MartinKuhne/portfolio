@@ -1,14 +1,21 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { PGlite } from '@electric-sql/pglite';
+import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm';
+import { sql } from 'drizzle-orm';
+import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
 import pg from 'pg';
 import { computeRelevanceScore, REFERENCE_DATE_ISO } from '@real-estate/shared';
 import {
   createPostgresDatabase,
   createTestDatabase,
+  ensureSchema,
   type AppDatabase,
 } from '../db/client.js';
+import * as schema from '../db/schema.js';
 import { listingsTable } from '../db/schema.js';
 import { seedDatabase } from '../db/seed.js';
 import { executeSearch } from '../search/executeSearch.js';
+import { mapListingRow } from '../search/searchQuery.js';
 
 describe('executeSearch domain service', () => {
   let db: AppDatabase;
@@ -55,6 +62,47 @@ describe('executeSearch domain service', () => {
     const resWildcardCity = await executeSearch(db, { city: 'Aust%' });
     expect(resWildcardCity.ok).toBe(true);
     expect(resWildcardCity.listings).toHaveLength(0);
+
+    const resUnderscoreCity = await executeSearch(db, { city: 'Aust_n' });
+    expect(resUnderscoreCity.ok).toBe(true);
+    expect(resUnderscoreCity.listings).toHaveLength(0);
+  });
+
+  it('matches city case-insensitively via LOWER(city) while treating % and _ as literal characters', async () => {
+    const cityDb = await createTestDatabase();
+    await cityDb.insert(listingsTable).values([
+      {
+        id: 'CITY-LIT-1',
+        address: '1 Literal Way',
+        city: '100%_Ville',
+        price: 400000,
+        bedrooms: 3,
+        description: 'City name containing literal percent and underscore',
+        listedDate: '2026-10-01T00:00:00.000Z',
+      },
+      {
+        id: 'CITY-LIT-2',
+        address: '2 Wildcard Trap Rd',
+        city: '100XYZ_Ville',
+        price: 410000,
+        bedrooms: 3,
+        description: 'Should not match literal percent query',
+        listedDate: '2026-10-02T00:00:00.000Z',
+      },
+      {
+        id: 'CITY-LIT-3',
+        address: '3 Underscore Trap Rd',
+        city: '100%AVille',
+        price: 420000,
+        bedrooms: 3,
+        description: 'Should not match literal underscore query',
+        listedDate: '2026-10-03T00:00:00.000Z',
+      },
+    ]);
+
+    const res = await executeSearch(cityDb, { city: '100%_vIlLe' });
+    expect(res.ok).toBe(true);
+    expect(res.listings.map((l) => l.id)).toEqual(['CITY-LIT-1']);
   });
 
   it('sorts by relevanceScore DESC, then listedDate DESC, then id ASC on ties (REQ-RNK-008..010)', async () => {
@@ -254,6 +302,124 @@ describe('executeSearch domain service', () => {
         })
       );
     }
+
+    // Verify no-targetBudget index-friendly listedDate DESC ordering matches REQ-RNK-008..010
+    const idsInOrder = withoutBudget.listings.map((item) => item.id);
+    expect(idsInOrder.indexOf('edge-future-date')).toBeLessThan(
+      idsInOrder.indexOf('edge-ref-date')
+    );
+    expect(idsInOrder.indexOf('edge-exact-365-days')).toBeLessThan(
+      idsInOrder.indexOf('edge-over-365-days')
+    );
+    for (let i = 1; i < withoutBudget.listings.length; i++) {
+      const prev = withoutBudget.listings[i - 1];
+      const curr = withoutBudget.listings[i];
+      expect(prev.relevanceScore).toBeGreaterThanOrEqual(curr.relevanceScore);
+      const prevMs = Date.parse(prev.listedDate);
+      const currMs = Date.parse(curr.listedDate);
+      expect(prevMs).toBeGreaterThanOrEqual(currMs);
+      if (prevMs === currMs) {
+        expect(prev.id <= curr.id).toBe(true);
+      }
+    }
+  });
+
+  it('creates TIMESTAMPTZ listed_date and all filter/ranking indexes via ensureSchema, including legacy TEXT migration', async () => {
+    const colResult = await db.execute<{ data_type: string }>(sql`
+      SELECT data_type
+      FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'listings'
+        AND column_name = 'listed_date';
+    `);
+    expect(colResult.rows[0]?.data_type).toBe('timestamp with time zone');
+
+    const idxResult = await db.execute<{ indexname: string }>(sql`
+      SELECT indexname
+      FROM pg_indexes
+      WHERE schemaname = current_schema()
+        AND tablename = 'listings';
+    `);
+    const indexNames = idxResult.rows.map((r) => r.indexname);
+    expect(indexNames).toContain('listings_id_source_unique');
+    expect(indexNames).toContain('listings_location_gist');
+    expect(indexNames).toContain('listings_listed_date_desc');
+    expect(indexNames).toContain('listings_price_idx');
+    expect(indexNames).toContain('listings_bedrooms_idx');
+    expect(indexNames).toContain('listings_city_lower_idx');
+    expect(indexNames).toContain('listings_description_trgm');
+
+    // Legacy TEXT listed_date table upgrade
+    const legacyClient = new PGlite({ extensions: { pg_trgm } });
+    const legacyDb = drizzlePglite(legacyClient, { schema });
+    await legacyClient.exec(`
+      CREATE TABLE listings (
+        internal_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        id TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'SEED',
+        address TEXT NOT NULL,
+        city TEXT NOT NULL,
+        price INTEGER NOT NULL,
+        bedrooms INTEGER NOT NULL,
+        description TEXT NOT NULL,
+        listed_date TEXT NOT NULL
+      );
+      INSERT INTO listings (id, address, city, price, bedrooms, description, listed_date)
+      VALUES ('LEG-1', '1 Legacy Ln', 'Austin', 400000, 2, 'Legacy text date', '2026-09-15T00:00:00.000Z');
+    `);
+
+    await ensureSchema(legacyDb);
+
+    const legacyCol = await legacyClient.query<{ data_type: string }>(`
+      SELECT data_type
+      FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'listings'
+        AND column_name = 'listed_date';
+    `);
+    expect(legacyCol.rows[0]?.data_type).toBe('timestamp with time zone');
+
+    const legacyIdx = await legacyClient.query<{ indexname: string }>(`
+      SELECT indexname FROM pg_indexes WHERE tablename = 'listings';
+    `);
+    const legacyIdxNames = legacyIdx.rows.map((r) => r.indexname);
+    expect(legacyIdxNames).toContain('listings_listed_date_desc');
+    expect(legacyIdxNames).toContain('listings_price_idx');
+    expect(legacyIdxNames).toContain('listings_bedrooms_idx');
+    expect(legacyIdxNames).toContain('listings_city_lower_idx');
+    expect(legacyIdxNames).toContain('listings_description_trgm');
+
+    const legacySearch = await executeSearch(legacyDb, { city: 'austin' });
+    expect(legacySearch.ok).toBe(true);
+    expect(legacySearch.listings[0]?.listedDate).toBe('2026-09-15T00:00:00.000Z');
+  });
+
+  it('normalizes Postgres TIMESTAMPTZ strings to UTC ISO-8601 and preserves invalid date strings in mapListingRow', () => {
+    const baseRow = {
+      internalId: '00000000-0000-0000-0000-000000000001',
+      id: 'ROW-1',
+      source: 'SEED',
+      address: '1 Test St',
+      city: 'Austin',
+      state: 'TX',
+      zip: '78701',
+      price: 450000,
+      bedrooms: 3,
+      bathrooms: 2,
+      sqft: 1500,
+      latitude: 30.26,
+      longitude: -97.74,
+      status: 'active',
+      description: 'Test',
+      relevanceScore: 0.85,
+    };
+
+    expect(mapListingRow({ ...baseRow, listedDate: '2026-08-29 00:00:00+00' }).listedDate).toBe(
+      '2026-08-29T00:00:00.000Z'
+    );
+    expect(mapListingRow({ ...baseRow, listedDate: 'not-a-valid-date' }).listedDate).toBe(
+      'not-a-valid-date'
+    );
   });
 
   it('idempotently seeds database without duplicating listings or throwing', async () => {

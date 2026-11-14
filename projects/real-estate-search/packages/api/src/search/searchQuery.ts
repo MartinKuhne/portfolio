@@ -39,7 +39,7 @@ export function buildSearchWhereClause(input: ValidatedSearchInput): SQL | undef
     conditions.push(gte(listingsTable.bedrooms, input.minBedrooms));
   }
   if (input.city !== undefined) {
-    conditions.push(sql`${listingsTable.city} ILIKE ${escapeLike(input.city)} ESCAPE '\\'`);
+    conditions.push(sql`LOWER(${listingsTable.city}) = LOWER(${input.city})`);
   }
   if (input.keyword !== undefined) {
     conditions.push(
@@ -52,7 +52,7 @@ export function buildSearchWhereClause(input: ValidatedSearchInput): SQL | undef
 
 /** Builds the SQL relevance score expression normalized to [0, 1] and rounded to 2 decimal places. */
 export function buildRelevanceScoreExpr(targetBudget?: number): SQL<number> {
-  const recencyExpr = sql`GREATEST(0.0, LEAST(1.0, 1.0 - GREATEST(0.0, EXTRACT(EPOCH FROM (${REFERENCE_DATE_ISO}::timestamptz - ${listingsTable.listedDate}::timestamptz)) / 86400.0) / ${MAX_RECENCY_DAYS}::double precision))`;
+  const recencyExpr = sql`GREATEST(0.0, LEAST(1.0, 1.0 - GREATEST(0.0, EXTRACT(EPOCH FROM (${REFERENCE_DATE_ISO}::timestamptz - ${listingsTable.listedDate})) / 86400.0) / ${MAX_RECENCY_DAYS}::double precision))`;
 
   const rawExpr =
     targetBudget !== undefined
@@ -94,6 +94,11 @@ export function planPagination(page: number, pageSize: number, totalResults: num
 
 /** Maps a projected database row into a public `Listing` domain object. */
 export function mapListingRow(row: ListingSelectRow): Listing {
+  const parsedListedDate = new Date(row.listedDate);
+  const listedDate = Number.isNaN(parsedListedDate.getTime())
+    ? row.listedDate
+    : parsedListedDate.toISOString();
+
   return {
     internalId: row.internalId,
     id: row.id,
@@ -110,7 +115,7 @@ export function mapListingRow(row: ListingSelectRow): Listing {
     longitude: row.longitude,
     status: row.status,
     description: row.description,
-    listedDate: row.listedDate,
+    listedDate,
     relevanceScore: Number(row.relevanceScore),
   };
 }

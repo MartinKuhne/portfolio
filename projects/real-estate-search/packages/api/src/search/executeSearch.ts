@@ -72,6 +72,21 @@ async function fetchListingPage(
   offset: number
 ): Promise<Listing[]> {
   const scoreExpr = buildRelevanceScoreExpr(input.targetBudget);
+  const orderByClauses =
+    input.targetBudget !== undefined
+      ? [
+          sql`${scoreExpr} DESC`,
+          sql`${listingsTable.listedDate} DESC`,
+          sql`${listingsTable.id} COLLATE "C" ASC`,
+          sql`${listingsTable.source} COLLATE "C" ASC`,
+          sql`${listingsTable.internalId} ASC`,
+        ]
+      : [
+          sql`${listingsTable.listedDate} DESC`,
+          sql`${listingsTable.id} COLLATE "C" ASC`,
+          sql`${listingsTable.source} COLLATE "C" ASC`,
+          sql`${listingsTable.internalId} ASC`,
+        ];
 
   const rows = await withApiSpan(
     'search.db.query',
@@ -105,13 +120,7 @@ async function fetchListingPage(
         })
         .from(listingsTable)
         .where(whereClause)
-        .orderBy(
-          sql`${scoreExpr} DESC`,
-          sql`${listingsTable.listedDate}::timestamptz DESC`,
-          sql`${listingsTable.id} COLLATE "C" ASC`,
-          sql`${listingsTable.source} COLLATE "C" ASC`,
-          sql`${listingsTable.internalId} ASC`
-        )
+        .orderBy(...orderByClauses)
         .limit(input.pageSize)
         .offset(offset);
       querySpan.setAttribute('search.returnedCount', resultRows.length);

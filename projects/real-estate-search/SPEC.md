@@ -139,3 +139,44 @@ Expected domain errors (input validation and out-of-range pagination) follow the
 - REQ-ERR-004: IF the search engine executes a query that fails input validation or pagination bounds, THEN the GraphQL endpoint shall return an error union variant (`SearchValidationError` or `SearchOutOfRangeError`) with a `SearchErrorCode` over HTTP `200 OK`; IF an unexpected server or database error occurs during execution, THEN the GraphQL endpoint shall return a GraphQL top-level `errors` entry with `extensions.code` set to `"INTERNAL_SERVER_ERROR"` and set `data.searchListings` to `null`.
 - REQ-ERR-005: IF the search engine receives invalid input, THEN the GraphQL error union variant (`SearchValidationError` / `SearchOutOfRangeError` implementing `SearchError`) shall include a structured `code`, `message`, and `field`.
 - REQ-ERR-006: IF the search engine receives invalid input, THEN the search engine shall handle the error without throwing an unhandled exception, and unexpected internal resolver failures shall return sanitized GraphQL `errors` without leaking internal stack traces or database details.
+
+---
+
+## 7. Internal Data Model
+
+The search engine persists all listings in the PostgreSQL `listings` table (`packages/api/src/db/schema.ts` and `packages/api/src/db/client.ts`). Surrogate `internal_id` (`UUID`) serves as the primary key, while `(id, source)` enforces multi-feed uniqueness.
+
+```mermaid
+erDiagram
+    LISTINGS {
+        uuid internal_id PK "DEFAULT gen_random_uuid()"
+        text id UK "NOT NULL; unique with source"
+        text source UK "NOT NULL DEFAULT SEED; unique with id"
+        text address "NOT NULL"
+        text city "NOT NULL; B-tree index on LOWER(city)"
+        text state "nullable"
+        text zip "nullable"
+        integer price "NOT NULL; B-tree indexed"
+        integer bedrooms "NOT NULL; B-tree indexed"
+        double_precision bathrooms "nullable"
+        integer sqft "nullable"
+        double_precision latitude "nullable; WGS-84"
+        double_precision longitude "nullable; WGS-84"
+        point location "nullable; POINT(longitude, latitude) GiST indexed"
+        timestamptz listed_date "NOT NULL; DESC B-tree indexed"
+        text status "NOT NULL DEFAULT active"
+        text description "NOT NULL; GIN pg_trgm indexed"
+    }
+```
+
+### Indexes
+
+- `listings_pkey`: Primary key on `(internal_id)`.
+- `listings_id_source_unique`: Unique composite B-tree index on `(id, source)`.
+- `listings_listed_date_desc`: Descending B-tree index on `(listed_date DESC)`.
+- `listings_price_idx`: B-tree index on `(price)`.
+- `listings_bedrooms_idx`: B-tree index on `(bedrooms)`.
+- `listings_city_lower_idx`: Expression B-tree index on `(LOWER(city))`.
+- `listings_location_gist`: GiST spatial index on `(location)`.
+- `listings_description_trgm`: GIN trigram index (`gin_trgm_ops`) on `(description)` when `pg_trgm` is available.
+

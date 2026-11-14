@@ -326,12 +326,25 @@ describe('importSampleListings and resolveSampleListingsPath', () => {
     `);
     expect(pkResult.rows.map((r) => r.attname)).toEqual(['internal_id']);
 
+    const colResult = await client.query<{ data_type: string }>(`
+      SELECT data_type
+      FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'listings'
+        AND column_name = 'listed_date';
+    `);
+    expect(colResult.rows[0]?.data_type).toBe('timestamp with time zone');
+
     const indexResult = await client.query<{ indexname: string }>(`
       SELECT indexname FROM pg_indexes WHERE tablename = 'listings';
     `);
     const indexNames = indexResult.rows.map((r) => r.indexname);
     expect(indexNames).toContain('listings_id_source_unique');
     expect(indexNames).toContain('listings_location_gist');
+    expect(indexNames).toContain('listings_listed_date_desc');
+    expect(indexNames).toContain('listings_price_idx');
+    expect(indexNames).toContain('listings_bedrooms_idx');
+    expect(indexNames).toContain('listings_city_lower_idx');
 
     const migratedRows = await legacyDb.select().from(listingsTable);
     expect(migratedRows).toHaveLength(3);
