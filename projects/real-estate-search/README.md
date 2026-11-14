@@ -27,7 +27,7 @@ A full-stack, production-grade real estate search application featuring a reacti
 
 The repository is organized as an npm workspaces monorepo:
 
-- **`packages/shared`**: Shared domain types, authoritative Zod validation schemas (`validateSearchInput`), and deterministic relevance scoring functions.
+- **`packages/shared`**: Shared domain types, pure zero-dependency TypeScript validation (`validateSearchInput`, per ADR-003), and deterministic relevance scoring functions.
 - **`packages/api`**: GraphQL Yoga server, Drizzle ORM schemas, PostgreSQL database client (with in-memory PGlite fallback for lightweight zero-dependency local runs and tests), and search execution pipeline.
 - **`packages/ui`**: React 18 single-page application styled with Material UI (MUI), featuring responsive layout, client-side input validation, loading spinners, stale response discard via request tokens and `AbortController`, and accessible pagination.
 - **`e2e`**: Playwright test suite validating real browser user journeys, happy paths, empty states, input validation errors, and network failure modes against live API and UI servers.
@@ -232,7 +232,7 @@ docker compose config
 ```graphql
 query SearchListings($input: SearchListingsInput) {
   searchListings(input: $input) {
-    status
+    ok
     listings {
       id
       address

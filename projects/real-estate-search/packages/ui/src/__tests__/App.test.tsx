@@ -216,12 +216,19 @@ describe('Real Estate Search UI (REQ-UI-001..012, REQ-PAG-006..010, REQ-ERR-001.
     );
   });
 
-  it('updates form state for minBedrooms, keyword, targetBudget, and pageSize dropdown', async () => {
+  it('updates form state for minBedrooms dropdown, keyword, targetBudget, and pageSize dropdown, and resets minBedrooms to Any', async () => {
     const user = userEvent.setup();
     const searchFn = vi.fn().mockResolvedValue(samplePage1);
     render(<App searchFn={searchFn} />);
 
-    await user.type(screen.getByLabelText(/min bedrooms/i), '2');
+    expect(screen.getByLabelText(/min bedrooms/i)).toHaveTextContent('Any');
+
+    await user.click(screen.getByLabelText(/min bedrooms/i));
+    expect(screen.getByRole('option', { name: 'Any' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: '3' })).toBeInTheDocument();
+    await user.click(screen.getByRole('option', { name: '2' }));
+    expect(screen.getByLabelText(/min bedrooms/i)).toHaveTextContent('2');
+
     await user.type(screen.getByLabelText(/keyword/i), 'pool');
     await user.type(screen.getByLabelText(/target budget/i), '500000');
     await user.click(screen.getByLabelText(/page size/i));
@@ -240,6 +247,41 @@ describe('Real Estate Search UI (REQ-UI-001..012, REQ-PAG-006..010, REQ-ERR-001.
         expect.any(AbortSignal)
       )
     );
+
+    await user.click(screen.getByRole('button', { name: /reset filters/i }));
+    expect(screen.getByLabelText(/min bedrooms/i)).toHaveTextContent('Any');
+    await waitFor(() => {
+      const lastCallArg = searchFn.mock.calls[searchFn.mock.calls.length - 1]?.[0];
+      expect(lastCallArg).not.toHaveProperty('minBedrooms');
+    });
+  });
+
+  it('pluralizes bedroom count grammatically (1 bedroom vs multiple bedrooms)', async () => {
+    const user = userEvent.setup();
+    const searchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      listings: [
+        {
+          id: 'LST-1BR',
+          address: '10 Studio Way, Austin, TX',
+          city: 'Austin',
+          price: 250000,
+          bedrooms: 1,
+          description: 'Cozy one-bedroom condo',
+          listedDate: '2026-10-20T00:00:00.000Z',
+          relevanceScore: 0.91,
+        },
+        ...samplePage1.listings,
+      ],
+      pagination: { page: 1, pageSize: 10, totalResults: 2, totalPages: 1 },
+      error: null,
+    });
+    render(<App searchFn={searchFn} />);
+
+    await user.click(screen.getByRole('button', { name: /search/i }));
+
+    expect(await screen.findByText('1 bedroom')).toBeInTheDocument();
+    expect(screen.getByText('3 bedrooms')).toBeInTheDocument();
   });
 
   it('handles server-returned error payload by displaying alert and clearing listings (REQ-ERR-001)', async () => {

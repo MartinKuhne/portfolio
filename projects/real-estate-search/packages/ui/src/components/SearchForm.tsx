@@ -2,6 +2,7 @@ import React from 'react';
 import { Box, Button, Grid, MenuItem, TextField } from '@mui/material';
 
 const PAGE_SIZE_OPTIONS = ['5', '10', '20', '50', '100'] as const;
+const MIN_BEDROOMS_OPTIONS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'] as const;
 
 export interface SearchFormState {
   minPrice: string;
@@ -62,13 +63,22 @@ export function SearchForm({
         </Grid>
         <Grid item xs={12} sm={6} md={3}>
           <TextField
+            select
             fullWidth
             id="min-bedrooms"
             label="Min Bedrooms"
             value={values.minBedrooms}
             onChange={handleChange('minBedrooms')}
-            inputProps={{ 'aria-label': 'Min Bedrooms' }}
-          />
+            SelectProps={{ displayEmpty: true }}
+            InputLabelProps={{ shrink: true }}
+          >
+            <MenuItem value="">Any</MenuItem>
+            {MIN_BEDROOMS_OPTIONS.map((count) => (
+              <MenuItem key={count} value={count}>
+                {count}
+              </MenuItem>
+            ))}
+          </TextField>
         </Grid>
         <Grid item xs={12} sm={6} md={3}>
           <TextField

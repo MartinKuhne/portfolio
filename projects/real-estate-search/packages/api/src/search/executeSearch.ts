@@ -151,13 +151,14 @@ export async function executeSearch(
       error: null,
     };
   } catch (err) {
+    console.error('executeSearch internal error:', err);
     return {
       ok: false,
       listings: [],
       pagination: null,
       error: {
         code: 'INTERNAL_ERROR',
-        message: err instanceof Error ? err.message : 'An unexpected database error occurred.',
+        message: 'An unexpected database error occurred.',
         field: null,
       },
     };

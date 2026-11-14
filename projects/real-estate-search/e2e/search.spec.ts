@@ -17,7 +17,8 @@ test.describe('Real Estate Search E2E Journeys', () => {
   test('filtering by city, price range, bedrooms, keyword, and targetBudget updates ranked results', async ({ page }) => {
     await page.goto('/');
     await page.getByLabel(/city/i).fill('Austin');
-    await page.getByLabel(/min bedrooms/i).fill('3');
+    await page.getByLabel(/min bedrooms/i).click();
+    await page.getByRole('option', { name: '3', exact: true }).click();
     await page.getByLabel(/target budget/i).fill('500000');
     await page.getByRole('button', { name: /search/i }).click();
 
@@ -52,11 +53,14 @@ test.describe('Real Estate Search E2E Journeys', () => {
     await page.goto('/');
     await page.getByLabel(/min price/i).fill('800000');
     await page.getByLabel(/max price/i).fill('200000');
+    await page.getByLabel(/min bedrooms/i).click();
+    await page.getByRole('option', { name: '3', exact: true }).click();
     await page.getByRole('button', { name: /search/i }).click();
 
     await expect(page.getByRole('alert')).toContainText(/minPrice must not exceed maxPrice/i);
 
     await page.getByRole('button', { name: /reset filters/i }).click();
+    await expect(page.getByLabel(/min bedrooms/i)).toHaveText('Any');
     await expect(page.getByText(/Page 1 of/i)).toBeVisible();
   });
 

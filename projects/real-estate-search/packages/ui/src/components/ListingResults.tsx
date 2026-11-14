@@ -64,7 +64,7 @@ export function ListingResults({
               {currencyFormatter.format(listing.price)}
             </Typography>
             <Typography variant="body1">
-              {listing.bedrooms} bedrooms
+              {listing.bedrooms} {listing.bedrooms === 1 ? 'bedroom' : 'bedrooms'}
             </Typography>
             <Typography variant="body2" color="text.secondary" sx={{ my: 0.5 }}>
               Relevance: {listing.relevanceScore.toFixed(2)}

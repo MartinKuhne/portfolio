@@ -80,7 +80,7 @@ This document records the architectural decisions and implementation rulings mad
   2. Keep the `Search` submit button enabled while loading so users can trigger a new search mid-flight and supersede stale requests.
   3. Run `validateSearchInput` in both `App.tsx` (so unit tests injecting a mock `searchFn` still exercise `REQ-VAL-001`) and `searchClient.ts`.
   4. Track committed `activeFormRef` separately from live `formState` so clicking `Next Page` / `Previous Page` paginates the active search even if unsubmitted inputs were edited (`REQ-PAG-008`).
-  5. Render `Page Size` as an MUI dropdown (`TextField select` with options `5`, `10`, `20`, `50`, `100`, defaulting to `10`), and only display search results after the user presses `Search` (or `Reset Filters`) rather than auto-querying on initial page load.
+  5. Render both `Min Bedrooms` (MUI `TextField select` with options `Any`, `1`–`10`, defaulting to `Any`) and `Page Size` (MUI `TextField select` with options `5`, `10`, `20`, `50`, `100`, defaulting to `10`) as dropdowns, and only display search results after the user presses `Search` (or `Reset Filters`) rather than auto-querying on initial page load.
 - **Consequences:**
   - Smaller UI bundle, deterministic race-condition handling, and full alignment between unit tests and Playwright E2E selectors.
 

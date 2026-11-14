@@ -1,10 +1,12 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
+import { computeRelevanceScore, REFERENCE_DATE_ISO } from '@real-estate/shared';
 import {
   createPostgresDatabase,
   createTestDatabase,
   type AppDatabase,
 } from '../db/client.js';
+import { listingsTable } from '../db/schema.js';
 import { seedDatabase } from '../db/seed.js';
 import { executeSearch } from '../search/executeSearch.js';
 
@@ -124,7 +126,8 @@ describe('executeSearch domain service', () => {
     expect(res.pagination).toBeNull();
   });
 
-  it('handles unexpected database errors gracefully by returning INTERNAL_ERROR (REQ-ERR-006)', async () => {
+  it('handles unexpected database errors gracefully by returning sanitized INTERNAL_ERROR (REQ-ERR-006)', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const mockDb = {
       select: () => {
         throw new Error('Simulated database connection failure');
@@ -135,14 +138,21 @@ describe('executeSearch domain service', () => {
     expect(res.ok).toBe(false);
     expect(res.error).toEqual({
       code: 'INTERNAL_ERROR',
-      message: 'Simulated database connection failure',
+      message: 'An unexpected database error occurred.',
       field: null,
     });
+    expect(res.error?.message).not.toContain('Simulated database connection failure');
+    expect(consoleSpy).toHaveBeenCalledWith(
+      'executeSearch internal error:',
+      expect.any(Error)
+    );
     expect(res.listings).toEqual([]);
     expect(res.pagination).toBeNull();
+    consoleSpy.mockRestore();
   });
 
-  it('handles non-Error thrown gracefully by returning INTERNAL_ERROR', async () => {
+  it('handles non-Error thrown gracefully by returning sanitized INTERNAL_ERROR', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const mockDb = {
       select: () => {
         throw 'String error';
@@ -156,8 +166,81 @@ describe('executeSearch domain service', () => {
       message: 'An unexpected database error occurred.',
       field: null,
     });
+    expect(res.error?.message).not.toContain('String error');
+    expect(consoleSpy).toHaveBeenCalledWith('executeSearch internal error:', 'String error');
     expect(res.listings).toEqual([]);
     expect(res.pagination).toBeNull();
+    consoleSpy.mockRestore();
+  });
+
+  it('maintains strict SQL-vs-shared scoring parity for edge-case and seed listings with and without targetBudget (ADR-004, REQ-RNK-002..007)', async () => {
+    const parityDb = await createTestDatabase();
+    await seedDatabase(parityDb);
+
+    await parityDb.insert(listingsTable).values([
+      {
+        id: 'edge-ref-date',
+        address: '100 Reference St',
+        city: 'ParityCity',
+        price: 500000,
+        bedrooms: 3,
+        description: 'Exact reference date listing',
+        listedDate: REFERENCE_DATE_ISO,
+      },
+      {
+        id: 'edge-future-date',
+        address: '200 Future Ave',
+        city: 'ParityCity',
+        price: 250000,
+        bedrooms: 2,
+        description: 'Future listed date clamping check',
+        listedDate: '2026-12-15T12:00:00.000Z',
+      },
+      {
+        id: 'edge-over-365-days',
+        address: '300 Vintage Rd',
+        city: 'ParityCity',
+        price: 1200000,
+        bedrooms: 4,
+        description: 'Older than 365 days and over 2x target budget',
+        listedDate: '2025-01-01T00:00:00.000Z',
+      },
+      {
+        id: 'edge-exact-365-days',
+        address: '400 Boundary Ln',
+        city: 'ParityCity',
+        price: 425000,
+        bedrooms: 3,
+        description: 'Exactly 365 days before reference date',
+        listedDate: '2025-11-01T00:00:00.000Z',
+      },
+    ]);
+
+    const targetBudget = 500000;
+    const withBudget = await executeSearch(parityDb, { pageSize: 100, targetBudget });
+    expect(withBudget.ok).toBe(true);
+    expect(withBudget.listings.length).toBe(28);
+    for (const item of withBudget.listings) {
+      expect(item.relevanceScore).toBe(
+        computeRelevanceScore({
+          price: item.price,
+          listedDate: item.listedDate,
+          targetBudget,
+        })
+      );
+    }
+
+    const withoutBudget = await executeSearch(parityDb, { pageSize: 100 });
+    expect(withoutBudget.ok).toBe(true);
+    expect(withoutBudget.listings.length).toBe(28);
+    for (const item of withoutBudget.listings) {
+      expect(item.relevanceScore).toBe(
+        computeRelevanceScore({
+          price: item.price,
+          listedDate: item.listedDate,
+        })
+      );
+    }
   });
 
   it('idempotently seeds database without duplicating listings or throwing', async () => {

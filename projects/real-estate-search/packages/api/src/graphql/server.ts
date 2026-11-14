@@ -117,6 +117,7 @@ export function createGraphqlApp(
               pagination: result.pagination ?? null,
             };
           } catch (err) {
+            console.error('GraphQL resolver internal error:', err);
             ctx.httpStatus = 500;
             return {
               ok: false,
@@ -124,7 +125,7 @@ export function createGraphqlApp(
               pagination: null,
               error: {
                 code: 'INTERNAL_ERROR',
-                message: err instanceof Error ? err.message : 'An unexpected error occurred.',
+                message: 'An unexpected internal error occurred.',
                 field: null,
               },
             };

@@ -154,7 +154,13 @@ if (isMain) {
     }
 
     const count = await importSampleListings(db, explicitPath);
-    console.log(`Successfully imported ${count} sample listings.`);
+    if (databaseUrl) {
+      console.log(`Successfully imported ${count} sample listings.`);
+    } else {
+      console.log(
+        `No DATABASE_URL set; imported ${count} sample listings into ephemeral in-memory PGlite.`
+      );
+    }
     if (closeDb) {
       await closeDb();
     }

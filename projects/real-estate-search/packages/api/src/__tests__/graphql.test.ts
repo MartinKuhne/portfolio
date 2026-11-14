@@ -222,7 +222,8 @@ describe('GraphQL searchListings endpoint', () => {
     });
   });
 
-  it('returns explicit 500 status and structured error object when database fails (REQ-ERR-004..006)', async () => {
+  it('returns explicit 500 status and sanitized structured error object when database fails (REQ-ERR-004..006)', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const brokenDb = {
       select: () => {
         throw new Error('Database connection lost');
@@ -250,10 +251,17 @@ describe('GraphQL searchListings endpoint', () => {
     const body = await response.json();
     expect(body.data.searchListings.ok).toBe(false);
     expect(body.data.searchListings.error.code).toBe('INTERNAL_ERROR');
+    expect(body.data.searchListings.error.message).toBe('An unexpected database error occurred.');
+    expect(body.data.searchListings.error.message).not.toContain('Database connection lost');
     expect(body.data.searchListings.error.field).toBeNull();
+    expect(consoleSpy).toHaveBeenCalledWith(
+      'executeSearch internal error:',
+      expect.any(Error)
+    );
   });
 
-  it('catches thrown unexpected errors in resolver with 500 status', async () => {
+  it('catches thrown unexpected errors in resolver with 500 status and sanitized message', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(searchService, 'executeSearch').mockRejectedValueOnce(
       new Error('Catastrophic failure')
     );
@@ -269,10 +277,16 @@ describe('GraphQL searchListings endpoint', () => {
     const body = await response.json();
     expect(body.data.searchListings.ok).toBe(false);
     expect(body.data.searchListings.error.code).toBe('INTERNAL_ERROR');
-    expect(body.data.searchListings.error.message).toBe('Catastrophic failure');
+    expect(body.data.searchListings.error.message).toBe('An unexpected internal error occurred.');
+    expect(body.data.searchListings.error.message).not.toContain('Catastrophic failure');
+    expect(consoleSpy).toHaveBeenCalledWith(
+      'GraphQL resolver internal error:',
+      expect.any(Error)
+    );
   });
 
-  it('handles non-Error thrown in resolver with 500 status', async () => {
+  it('handles non-Error thrown in resolver with 500 status and sanitized message', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(searchService, 'executeSearch').mockRejectedValueOnce('raw string error');
 
     const response = await yoga.fetch('http://localhost:4000/graphql', {
@@ -286,7 +300,12 @@ describe('GraphQL searchListings endpoint', () => {
     const body = await response.json();
     expect(body.data.searchListings.ok).toBe(false);
     expect(body.data.searchListings.error.code).toBe('INTERNAL_ERROR');
-    expect(body.data.searchListings.error.message).toBe('An unexpected error occurred.');
+    expect(body.data.searchListings.error.message).toBe('An unexpected internal error occurred.');
+    expect(body.data.searchListings.error.message).not.toContain('raw string error');
+    expect(consoleSpy).toHaveBeenCalledWith(
+      'GraphQL resolver internal error:',
+      'raw string error'
+    );
   });
 
   it('handles malformed GraphQL requests cleanly without crashing (REQ-ERR-006)', async () => {

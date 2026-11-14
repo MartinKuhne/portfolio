@@ -18,6 +18,10 @@ COPY packages/api ./packages/api
 # Build shared and api workspaces
 RUN npm run build -w @real-estate/shared && npm run build -w @real-estate/api
 
+# Run container as non-root user
+RUN chown -R node:node /app
+USER node
+
 ENV PORT=4000
 EXPOSE 4000
 
