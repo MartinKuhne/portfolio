@@ -356,16 +356,51 @@ describe('GraphQL searchListings endpoint', () => {
     expect(body.errors.length).toBeGreaterThan(0);
   });
 
-  it('responds to CORS preflight OPTIONS request', async () => {
-    const response = await yoga.fetch('http://localhost:4000/graphql', {
+  it('responds to CORS preflight OPTIONS request for allowed origins and blocks untrusted origins', async () => {
+    const allowedResponse = await yoga.fetch('http://localhost:4000/graphql', {
       method: 'OPTIONS',
       headers: {
         Origin: 'http://localhost:5173',
         'Access-Control-Request-Method': 'POST',
       },
     });
-    expect([200, 204]).toContain(response.status);
-    expect(response.headers.get('access-control-allow-origin')).toBe('http://localhost:5173');
+    expect([200, 204]).toContain(allowedResponse.status);
+    expect(allowedResponse.headers.get('access-control-allow-origin')).toBe('http://localhost:5173');
+    expect(allowedResponse.headers.get('access-control-allow-credentials')).toBeNull();
+
+    const blockedResponse = await yoga.fetch('http://localhost:4000/graphql', {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://evil.com',
+        'Access-Control-Request-Method': 'POST',
+      },
+    });
+    expect(blockedResponse.headers.get('access-control-allow-origin')).not.toBe('https://evil.com');
+    expect(blockedResponse.headers.get('access-control-allow-credentials')).toBeNull();
+  });
+
+  it('rejects excessive GraphQL root field alias batching and query nesting depth (SEC-06)', async () => {
+    const aliasedFields = Array.from({ length: 11 }, (_, idx) => `q${idx}: searchListings { __typename }`).join(' ');
+    const aliasRes = await yoga.fetch('http://localhost:4000/graphql', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query: `query TooManyAliases { ${aliasedFields} }` }),
+    });
+    const aliasBody = await aliasRes.json();
+    expect(aliasBody.errors[0].message).toMatch(/maximum allowed root field count/i);
+
+    // Construct a deeply nested GraphQL selection set (> 15 levels) using inline fragments
+    let nested = '__typename';
+    for (let i = 0; i < 16; i += 1) {
+      nested = `... on SearchListingsResult { ${nested} }`;
+    }
+    const depthRes = await yoga.fetch('http://localhost:4000/graphql', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query: `query TooDeep { searchListings { ${nested} } }` }),
+    });
+    const depthBody = await depthRes.json();
+    expect(depthBody.errors[0].message).toMatch(/maximum allowed depth/i);
   });
 });
 
@@ -397,6 +432,32 @@ describe('JSONScalar AST parsing and serialization', () => {
     expect(parseLiteral({ kind: Kind.VARIABLE, name: { kind: Kind.NAME, value: 'var' } })).toBeUndefined();
   });
 
+  it('rejects deeply nested AST literals and prototype pollution keys (SEC-07)', () => {
+    let deepList: { kind: Kind.LIST; values: any[] } = {
+      kind: Kind.LIST,
+      values: [{ kind: Kind.INT, value: '1' }],
+    };
+    for (let i = 0; i < 6; i += 1) {
+      deepList = { kind: Kind.LIST, values: [deepList] };
+    }
+    expect(() => parseLiteral(deepList)).toThrow(/nesting exceeds maximum allowed depth/i);
+
+    for (const forbidden of ['__proto__', 'constructor', 'prototype']) {
+      expect(() =>
+        parseLiteral({
+          kind: Kind.OBJECT,
+          fields: [
+            {
+              kind: Kind.OBJECT_FIELD,
+              name: { kind: Kind.NAME, value: forbidden },
+              value: { kind: Kind.STRING, value: 'bad' },
+            },
+          ],
+        })
+      ).toThrow(/Invalid input object key/i);
+    }
+  });
+
   it('serializes and parses value directly', () => {
     expect(JSONScalar.serialize(123)).toBe(123);
     expect(JSONScalar.parseValue('abc')).toBe('abc');
@@ -404,9 +465,20 @@ describe('JSONScalar AST parsing and serialization', () => {
 });
 
 describe('startServer lifecycle and HTTP execution', () => {
-  it('starts server on ephemeral port, executes query over HTTP, and stops cleanly', async () => {
+  it('starts server on ephemeral port, emits server.started OTel JSON log, executes query over HTTP, and stops cleanly', async () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const serverInstance = await startServer({ port: 0 });
     expect(serverInstance.port).toBeGreaterThan(0);
+
+    const logEntries = consoleSpy.mock.calls.map((call) => JSON.parse(String(call[0])));
+    const startedLog = logEntries.find((entry) => entry.body === 'server.started');
+    expect(startedLog).toBeDefined();
+    expect(startedLog.service).toBe('real-estate-api');
+    expect(startedLog.severityText).toBe('INFO');
+    expect(startedLog.attributes['server.port']).toBe(serverInstance.port);
+    expect(startedLog.attributes['url.full']).toBe(
+      `http://localhost:${serverInstance.port}/graphql`
+    );
 
     const response = await fetch(`http://localhost:${serverInstance.port}/graphql`, {
       method: 'POST',

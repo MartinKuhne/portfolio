@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { createPostgresDatabase, createTestDatabase, type AppDatabase } from './db/client.js';
 import { seedDatabase } from './db/seed.js';
 import { createGraphqlApp } from './graphql/server.js';
-import { initApiTelemetry, shutdownApiTelemetry } from './telemetry.js';
+import { initApiTelemetry, logApi, SeverityNumber, shutdownApiTelemetry } from './telemetry.js';
 
 export { createGraphqlApp } from './graphql/server.js';
 export { executeSearch } from './search/executeSearch.js';
@@ -54,6 +54,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
       const address = server.address();
       const actualPort =
         typeof address === 'object' && address !== null ? address.port : desiredPort;
+      logApi(SeverityNumber.INFO, 'INFO', 'server.started', {
+        'server.port': actualPort,
+        'url.full': `http://localhost:${actualPort}/graphql`,
+      });
       resolve({
         server,
         port: actualPort,
@@ -114,7 +118,6 @@ const isMain =
 if (isMain) {
   startServer()
     .then((runningServer) => {
-      console.log(`Server is running on http://localhost:${runningServer.port}/graphql`);
       registerShutdownHandlers(runningServer);
     })
     .catch((err) => {

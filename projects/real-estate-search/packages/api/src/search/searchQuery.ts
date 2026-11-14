@@ -8,7 +8,7 @@ import {
   type SearchError,
   type ValidatedSearchInput,
 } from '@real-estate/shared';
-import { and, gte, lte, sql, type SQL } from 'drizzle-orm';
+import { and, gte, sql, type SQL } from 'drizzle-orm';
 import { listingsTable, type ListingRecord } from '../db/schema.js';
 
 export type ListingSelectRow = Omit<ListingRecord, 'location'> & {
@@ -30,10 +30,10 @@ export function buildSearchWhereClause(input: ValidatedSearchInput): SQL | undef
   const conditions: SQL[] = [];
 
   if (input.minPrice !== undefined) {
-    conditions.push(gte(listingsTable.price, input.minPrice));
+    conditions.push(sql`${listingsTable.price} >= ${input.minPrice}::numeric`);
   }
   if (input.maxPrice !== undefined) {
-    conditions.push(lte(listingsTable.price, input.maxPrice));
+    conditions.push(sql`${listingsTable.price} <= ${input.maxPrice}::numeric`);
   }
   if (input.minBedrooms !== undefined) {
     conditions.push(gte(listingsTable.bedrooms, input.minBedrooms));

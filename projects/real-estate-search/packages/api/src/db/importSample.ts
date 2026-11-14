@@ -8,6 +8,7 @@ import {
   type AppDatabase,
 } from './client.js';
 import type { NewListingRecord } from './schema.js';
+import { initApiTelemetry, logApi, SeverityNumber, shutdownApiTelemetry } from '../telemetry.js';
 
 export interface SampleListingRecord {
   id: string;
@@ -224,18 +225,21 @@ export async function importSampleListings(
   return inserted.length;
 }
 
-export const isMain =
-  Boolean(process.argv[1]) &&
-  fileURLToPath(import.meta.url).toLowerCase() === path.resolve(process.argv[1]).toLowerCase();
+export interface RunImportCliOptions {
+  explicitPath?: string;
+  databaseUrl?: string;
+}
 
-/* v8 ignore start */
-if (isMain) {
-  const explicitPath = process.argv[2];
-  const databaseUrl = process.env.DATABASE_URL;
+/**
+ * Runs the sample-listings CLI import flow with initialized OpenTelemetry logging.
+ */
+export async function runImportCli(options: RunImportCliOptions = {}): Promise<number> {
+  const { explicitPath, databaseUrl } = options;
   let db: AppDatabase;
   let closeDb: (() => Promise<void>) | undefined;
 
-  const run = async () => {
+  initApiTelemetry();
+  try {
     if (databaseUrl) {
       const pgDb = await createPostgresDatabase(databaseUrl);
       db = pgDb.db;
@@ -245,19 +249,34 @@ if (isMain) {
     }
 
     const count = await importSampleListings(db, explicitPath);
-    if (databaseUrl) {
-      console.log(`Successfully imported ${count} sample listings.`);
-    } else {
-      console.log(
-        `No DATABASE_URL set; imported ${count} sample listings into ephemeral in-memory PGlite.`
-      );
+    logApi(SeverityNumber.INFO, 'INFO', 'db.import.completed', {
+      'db.system': 'postgresql',
+      'db.target': databaseUrl ? 'postgres' : 'ephemeral-pglite',
+      'import.count': count,
+      ...(explicitPath ? { 'import.path': explicitPath } : {}),
+    });
+    return count;
+  } finally {
+    try {
+      if (closeDb) {
+        await closeDb();
+      }
+    } finally {
+      await shutdownApiTelemetry();
     }
-    if (closeDb) {
-      await closeDb();
-    }
-  };
+  }
+}
 
-  run().catch((err) => {
+export const isMain =
+  Boolean(process.argv[1]) &&
+  fileURLToPath(import.meta.url).toLowerCase() === path.resolve(process.argv[1]).toLowerCase();
+
+/* v8 ignore start */
+if (isMain) {
+  runImportCli({
+    explicitPath: process.argv[2],
+    databaseUrl: process.env.DATABASE_URL,
+  }).catch((err) => {
     console.error('Failed to import sample listings:', err);
     process.exit(1);
   });

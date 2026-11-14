@@ -1,5 +1,13 @@
 import { SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
-import { GraphQLScalarType, Kind, type ValueNode } from 'graphql';
+import {
+  GraphQLError,
+  GraphQLScalarType,
+  Kind,
+  type SelectionSetNode,
+  type ValidationContext,
+  type ValidationRule,
+  type ValueNode,
+} from 'graphql';
 import { createGraphQLError, createSchema, createYoga, type YogaServerInstance } from 'graphql-yoga';
 import type { RawSearchInput, SearchResponse } from '@real-estate/shared';
 import type { AppDatabase } from '../db/client.js';
@@ -12,7 +20,18 @@ import {
   withApiSpan,
 } from '../telemetry.js';
 
-export function parseLiteral(ast: ValueNode): unknown {
+const MAX_LITERAL_DEPTH = 5;
+const MAX_ROOT_FIELDS = 10;
+const MAX_QUERY_DEPTH = 15;
+const FORBIDDEN_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function parseLiteralNode(ast: ValueNode, depth: number): unknown {
+  if (depth > MAX_LITERAL_DEPTH) {
+    throw createGraphQLError('Input literal nesting exceeds maximum allowed depth.', {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+
   switch (ast.kind) {
     case Kind.STRING:
     case Kind.BOOLEAN:
@@ -24,17 +43,67 @@ export function parseLiteral(ast: ValueNode): unknown {
     case Kind.NULL:
       return null;
     case Kind.LIST:
-      return ast.values.map(parseLiteral);
+      return ast.values.map((item) => parseLiteralNode(item, depth + 1));
     case Kind.OBJECT: {
-      const obj: Record<string, unknown> = {};
+      const obj: Record<string, unknown> = Object.create(null);
       for (const field of ast.fields) {
-        obj[field.name.value] = parseLiteral(field.value);
+        if (FORBIDDEN_OBJECT_KEYS.has(field.name.value)) {
+          throw createGraphQLError('Invalid input object key.', {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
+        obj[field.name.value] = parseLiteralNode(field.value, depth + 1);
       }
       return obj;
     }
     default:
       return undefined;
   }
+}
+
+export function parseLiteral(ast: ValueNode): unknown {
+  return parseLiteralNode(ast, 0);
+}
+
+function measureSelectionDepth(selectionSet: SelectionSetNode | undefined, depth: number): number {
+  if (!selectionSet) {
+    return depth;
+  }
+  let deepest = depth;
+  for (const selection of selectionSet.selections) {
+    if ('selectionSet' in selection && selection.selectionSet) {
+      deepest = Math.max(deepest, measureSelectionDepth(selection.selectionSet, depth + 1));
+    }
+  }
+  return deepest;
+}
+
+const queryComplexityRule: ValidationRule = (context: ValidationContext) => ({
+  OperationDefinition(node) {
+    if (node.selectionSet.selections.length > MAX_ROOT_FIELDS) {
+      context.reportError(
+        new GraphQLError(
+          `Query exceeds maximum allowed root field count (${MAX_ROOT_FIELDS}).`,
+          { nodes: node, extensions: { code: 'BAD_USER_INPUT' } }
+        )
+      );
+    }
+    if (measureSelectionDepth(node.selectionSet, 1) > MAX_QUERY_DEPTH) {
+      context.reportError(
+        new GraphQLError(`Query exceeds maximum allowed depth (${MAX_QUERY_DEPTH}).`, {
+          nodes: node,
+          extensions: { code: 'BAD_USER_INPUT' },
+        })
+      );
+    }
+  },
+});
+
+function getAllowedCorsOrigins(): string[] {
+  return (process.env.CORS_ORIGIN ?? 'http://localhost:8080,http://localhost:5173')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
 }
 
 export const JSONScalar = new GraphQLScalarType({
@@ -227,11 +296,16 @@ export function createGraphqlApp(
   return createYoga({
     schema,
     cors: {
+      origin: getAllowedCorsOrigins(),
+      credentials: false,
       allowedHeaders: ['content-type', 'traceparent', 'tracestate'],
       methods: ['GET', 'POST', 'OPTIONS'],
     },
     plugins: [
       {
+        onValidate({ addValidationRule }: { addValidationRule: (rule: ValidationRule) => void }) {
+          addValidationRule(queryComplexityRule);
+        },
         instrumentation: {
           request({ request }, wrapped) {
             const parentContext = extractTraceContext(request.headers);

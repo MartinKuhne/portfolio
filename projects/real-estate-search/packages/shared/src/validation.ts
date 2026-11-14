@@ -7,9 +7,24 @@ import {
   type ValidatedSearchInput,
 } from './types.js';
 
+export const MAX_PG_INT = 2_147_483_647;
+export const MAX_CITY_LENGTH = 100;
+export const MAX_KEYWORD_LENGTH = 255;
+
 export type ValidationResult =
   | { ok: true; value: ValidatedSearchInput }
   | { ok: false; error: SearchError };
+
+function validationError(field: string | null, message: string): ValidationResult {
+  return {
+    ok: false,
+    error: {
+      code: 'VALIDATION_ERROR',
+      field,
+      message,
+    },
+  };
+}
 
 function parseNumeric(
   value: unknown,
@@ -72,16 +87,51 @@ function parseNumeric(
   };
 }
 
-export function validateSearchInput(raw: RawSearchInput): ValidationResult {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+function parseBoundedString(
+  value: unknown,
+  fieldName: string,
+  maxLength: number
+): { value?: string; error?: SearchError } {
+  if (value === undefined || value === null) {
+    return {};
+  }
+  if (typeof value !== 'string') {
     return {
-      ok: false,
       error: {
         code: 'VALIDATION_ERROR',
-        field: null,
-        message: 'Search input must be an object.',
+        field: fieldName,
+        message: `${fieldName} must be a string.`,
       },
     };
+  }
+  if (value.includes('\0')) {
+    return {
+      error: {
+        code: 'VALIDATION_ERROR',
+        field: fieldName,
+        message: `${fieldName} must not contain null characters.`,
+      },
+    };
+  }
+  const trimmed = value.trim();
+  if (trimmed === '') {
+    return {};
+  }
+  if (trimmed.length > maxLength) {
+    return {
+      error: {
+        code: 'VALIDATION_ERROR',
+        field: fieldName,
+        message: `${fieldName} must not exceed ${maxLength} characters.`,
+      },
+    };
+  }
+  return { value: trimmed };
+}
+
+export function validateSearchInput(raw: RawSearchInput): ValidationResult {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return validationError(null, 'Search input must be an object.');
   }
 
   // 1. minPrice
@@ -92,14 +142,10 @@ export function validateSearchInput(raw: RawSearchInput): ValidationResult {
   }
   if (!minPriceRes.omitted) {
     if (minPriceRes.parsed! < 0) {
-      return {
-        ok: false,
-        error: {
-          code: 'VALIDATION_ERROR',
-          field: 'minPrice',
-          message: 'minPrice must be greater than or equal to 0.',
-        },
-      };
+      return validationError('minPrice', 'minPrice must be greater than or equal to 0.');
+    }
+    if (minPriceRes.parsed! > MAX_PG_INT) {
+      return validationError('minPrice', `minPrice must not exceed ${MAX_PG_INT}.`);
     }
     minPrice = minPriceRes.parsed;
   }
@@ -112,28 +158,17 @@ export function validateSearchInput(raw: RawSearchInput): ValidationResult {
   }
   if (!maxPriceRes.omitted) {
     if (maxPriceRes.parsed! < 0) {
-      return {
-        ok: false,
-        error: {
-          code: 'VALIDATION_ERROR',
-          field: 'maxPrice',
-          message: 'maxPrice must be greater than or equal to 0.',
-        },
-      };
+      return validationError('maxPrice', 'maxPrice must be greater than or equal to 0.');
+    }
+    if (maxPriceRes.parsed! > MAX_PG_INT) {
+      return validationError('maxPrice', `maxPrice must not exceed ${MAX_PG_INT}.`);
     }
     maxPrice = maxPriceRes.parsed;
   }
 
   // 3. minPrice <= maxPrice
   if (minPrice !== undefined && maxPrice !== undefined && minPrice > maxPrice) {
-    return {
-      ok: false,
-      error: {
-        code: 'VALIDATION_ERROR',
-        field: 'minPrice',
-        message: 'minPrice must not exceed maxPrice.',
-      },
-    };
+    return validationError('minPrice', 'minPrice must not exceed maxPrice.');
   }
 
   // 4. minBedrooms
@@ -143,15 +178,15 @@ export function validateSearchInput(raw: RawSearchInput): ValidationResult {
     return { ok: false, error: minBedroomsRes.error };
   }
   if (!minBedroomsRes.omitted) {
-    if (!Number.isInteger(minBedroomsRes.parsed!) || minBedroomsRes.parsed! < 0) {
-      return {
-        ok: false,
-        error: {
-          code: 'VALIDATION_ERROR',
-          field: 'minBedrooms',
-          message: 'minBedrooms must be an integer greater than or equal to 0.',
-        },
-      };
+    if (
+      !Number.isInteger(minBedroomsRes.parsed!) ||
+      minBedroomsRes.parsed! < 0 ||
+      minBedroomsRes.parsed! > MAX_PG_INT
+    ) {
+      return validationError(
+        'minBedrooms',
+        `minBedrooms must be an integer between 0 and ${MAX_PG_INT}.`
+      );
     }
     minBedrooms = minBedroomsRes.parsed;
   }
@@ -163,15 +198,8 @@ export function validateSearchInput(raw: RawSearchInput): ValidationResult {
     return { ok: false, error: targetBudgetRes.error };
   }
   if (!targetBudgetRes.omitted) {
-    if (targetBudgetRes.parsed! <= 0) {
-      return {
-        ok: false,
-        error: {
-          code: 'VALIDATION_ERROR',
-          field: 'targetBudget',
-          message: 'targetBudget must be greater than 0.',
-        },
-      };
+    if (targetBudgetRes.parsed! <= 0 || targetBudgetRes.parsed! > Number.MAX_SAFE_INTEGER) {
+      return validationError('targetBudget', 'targetBudget must be greater than 0 and within safe numeric limits.');
     }
     targetBudget = targetBudgetRes.parsed;
   }
@@ -188,14 +216,10 @@ export function validateSearchInput(raw: RawSearchInput): ValidationResult {
       pageSizeRes.parsed! <= 0 ||
       pageSizeRes.parsed! > MAX_PAGE_SIZE
     ) {
-      return {
-        ok: false,
-        error: {
-          code: 'VALIDATION_ERROR',
-          field: 'pageSize',
-          message: `pageSize must be an integer between 1 and ${MAX_PAGE_SIZE}.`,
-        },
-      };
+      return validationError(
+        'pageSize',
+        `pageSize must be an integer between 1 and ${MAX_PAGE_SIZE}.`
+      );
     }
     pageSize = pageSizeRes.parsed!;
   }
@@ -207,55 +231,26 @@ export function validateSearchInput(raw: RawSearchInput): ValidationResult {
     return { ok: false, error: pageRes.error };
   }
   if (!pageRes.omitted) {
-    if (!Number.isInteger(pageRes.parsed!) || pageRes.parsed! < 1) {
-      return {
-        ok: false,
-        error: {
-          code: 'VALIDATION_ERROR',
-          field: 'page',
-          message: 'page must be an integer greater than or equal to 1.',
-        },
-      };
+    if (
+      !Number.isInteger(pageRes.parsed!) ||
+      pageRes.parsed! < 1 ||
+      pageRes.parsed! > MAX_PG_INT
+    ) {
+      return validationError('page', `page must be an integer between 1 and ${MAX_PG_INT}.`);
     }
     page = pageRes.parsed!;
   }
 
   // 8. city
-  let city: string | undefined;
-  if (raw.city !== undefined && raw.city !== null) {
-    if (typeof raw.city !== 'string') {
-      return {
-        ok: false,
-        error: {
-          code: 'VALIDATION_ERROR',
-          field: 'city',
-          message: 'city must be a string.',
-        },
-      };
-    }
-    const trimmed = raw.city.trim();
-    if (trimmed !== '') {
-      city = trimmed;
-    }
+  const cityRes = parseBoundedString(raw.city, 'city', MAX_CITY_LENGTH);
+  if (cityRes.error) {
+    return { ok: false, error: cityRes.error };
   }
 
   // 9. keyword
-  let keyword: string | undefined;
-  if (raw.keyword !== undefined && raw.keyword !== null) {
-    if (typeof raw.keyword !== 'string') {
-      return {
-        ok: false,
-        error: {
-          code: 'VALIDATION_ERROR',
-          field: 'keyword',
-          message: 'keyword must be a string.',
-        },
-      };
-    }
-    const trimmed = raw.keyword.trim();
-    if (trimmed !== '') {
-      keyword = trimmed;
-    }
+  const keywordRes = parseBoundedString(raw.keyword, 'keyword', MAX_KEYWORD_LENGTH);
+  if (keywordRes.error) {
+    return { ok: false, error: keywordRes.error };
   }
 
   const value: ValidatedSearchInput = {
@@ -267,8 +262,8 @@ export function validateSearchInput(raw: RawSearchInput): ValidationResult {
   if (maxPrice !== undefined) value.maxPrice = maxPrice;
   if (minBedrooms !== undefined) value.minBedrooms = minBedrooms;
   if (targetBudget !== undefined) value.targetBudget = targetBudget;
-  if (city !== undefined) value.city = city;
-  if (keyword !== undefined) value.keyword = keyword;
+  if (cityRes.value !== undefined) value.city = cityRes.value;
+  if (keywordRes.value !== undefined) value.keyword = keywordRes.value;
 
   return { ok: true, value };
 }

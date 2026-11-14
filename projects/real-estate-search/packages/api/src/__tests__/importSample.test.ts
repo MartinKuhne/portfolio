@@ -12,9 +12,11 @@ import {
   ensureSchema,
   type AppDatabase,
 } from '../db/client.js';
+import * as clientModule from '../db/client.js';
 import {
   importSampleListings,
   resolveSampleListingsPath,
+  runImportCli,
 } from '../db/importSample.js';
 import * as schema from '../db/schema.js';
 import { listingsTable } from '../db/schema.js';
@@ -393,5 +395,66 @@ describe('importSampleListings and resolveSampleListingsPath', () => {
       createPostgresDatabase('postgres://user:pass@localhost:5432/broken_db')
     ).rejects.toThrow('Schema init failed');
     expect(endSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('runImportCli emits structured OTel JSON log for ephemeral PGlite mode', async () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const count = await runImportCli();
+    expect(count).toBe(12);
+
+    const logEntries = consoleSpy.mock.calls.map((call) => JSON.parse(String(call[0])));
+    const importLog = logEntries.find((entry) => entry.body === 'db.import.completed');
+    expect(importLog).toBeDefined();
+    expect(importLog.service).toBe('real-estate-api');
+    expect(importLog.severityText).toBe('INFO');
+    expect(importLog.attributes['db.system']).toBe('postgresql');
+    expect(importLog.attributes['db.target']).toBe('ephemeral-pglite');
+    expect(importLog.attributes['import.count']).toBe(12);
+    expect(importLog.attributes['import.path']).toBeUndefined();
+  });
+
+  it('runImportCli emits structured OTel JSON log and closes DB for Postgres mode', async () => {
+    const isolatedDb = await createTestDatabase();
+    const mockClose = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(clientModule, 'createPostgresDatabase').mockResolvedValueOnce({
+      db: isolatedDb,
+      close: mockClose,
+    });
+
+    const explicitFile = path.join(tempDir, 'cli-postgres.json');
+    fs.writeFileSync(
+      explicitFile,
+      JSON.stringify([
+        {
+          id: 'CLI-PG-1',
+          address: '500 Market St',
+          city: 'Reston',
+          price: 550000,
+          bedrooms: 3,
+          listedDate: '2026-09-15',
+          description: 'CLI Postgres import test listing',
+        },
+      ])
+    );
+
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const count = await runImportCli({
+      explicitPath: explicitFile,
+      databaseUrl: 'postgres://user:pass@localhost:5432/mock_db',
+    });
+    expect(count).toBe(1);
+    expect(mockClose).toHaveBeenCalledTimes(1);
+
+    const logEntries = consoleSpy.mock.calls.map((call) => JSON.parse(String(call[0])));
+    const importLog = logEntries.find((entry) => entry.body === 'db.import.completed');
+    expect(importLog).toBeDefined();
+    expect(importLog.service).toBe('real-estate-api');
+    expect(importLog.severityText).toBe('INFO');
+    expect(importLog.attributes['db.system']).toBe('postgresql');
+    expect(importLog.attributes['db.target']).toBe('postgres');
+    expect(importLog.attributes['import.count']).toBe(1);
+    expect(importLog.attributes['import.path']).toBe(explicitFile);
   });
 });

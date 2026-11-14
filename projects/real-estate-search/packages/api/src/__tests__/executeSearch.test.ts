@@ -126,6 +126,19 @@ describe('executeSearch domain service', () => {
     expect(res.pagination).toBeNull();
   });
 
+  it('handles decimal minPrice/maxPrice safely in SQL and blocks INT4 overflow or null-byte injection via validation', async () => {
+    const decimalRes = await executeSearch(db, { minPrice: 250000.5, maxPrice: 600000.75 });
+    expect(decimalRes.ok).toBe(true);
+
+    const overflowRes = await executeSearch(db, { minPrice: 2_147_483_648 });
+    expect(overflowRes.ok).toBe(false);
+    expect(overflowRes.error?.code).toBe('VALIDATION_ERROR');
+
+    const nullByteRes = await executeSearch(db, { city: 'Austin\0' });
+    expect(nullByteRes.ok).toBe(false);
+    expect(nullByteRes.error?.code).toBe('VALIDATION_ERROR');
+  });
+
   it('handles unexpected database errors gracefully by returning sanitized INTERNAL_ERROR (REQ-ERR-006)', async () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const mockDb = {

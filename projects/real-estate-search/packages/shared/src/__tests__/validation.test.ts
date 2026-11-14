@@ -213,6 +213,40 @@ describe('validateSearchInput', () => {
       });
     }
   });
+
+  it('rejects integers exceeding 32-bit PostgreSQL INT4 max and excessive targetBudget (SEC-01, SEC-02)', () => {
+    const overInt = 2_147_483_648;
+    for (const [field, input] of [
+      ['minPrice', { minPrice: overInt }],
+      ['maxPrice', { maxPrice: overInt }],
+      ['minBedrooms', { minBedrooms: overInt }],
+      ['page', { page: overInt }],
+      ['targetBudget', { targetBudget: Number.MAX_SAFE_INTEGER + 1 }],
+    ] as const) {
+      const res = validateSearchInput(input);
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.error.code).toBe('VALIDATION_ERROR');
+        expect(res.error.field).toBe(field);
+      }
+    }
+  });
+
+  it('rejects null bytes and oversized strings in city and keyword (SEC-04, SEC-05)', () => {
+    for (const [field, badValue] of [
+      ['city', 'Austin\0'],
+      ['city', 'a'.repeat(101)],
+      ['keyword', 'pool\0'],
+      ['keyword', 'k'.repeat(256)],
+    ] as const) {
+      const res = validateSearchInput({ [field]: badValue });
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.error.code).toBe('VALIDATION_ERROR');
+        expect(res.error.field).toBe(field);
+      }
+    }
+  });
 });
 
 describe('index exports', () => {
