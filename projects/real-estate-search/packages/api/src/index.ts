@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { createPostgresDatabase, createTestDatabase, type AppDatabase } from './db/client.js';
 import { seedDatabase } from './db/seed.js';
 import { createGraphqlApp } from './graphql/server.js';
+import { initApiTelemetry, shutdownApiTelemetry } from './telemetry.js';
 
 export { createGraphqlApp } from './graphql/server.js';
 export { executeSearch } from './search/executeSearch.js';
@@ -11,6 +12,7 @@ export * from './db/client.js';
 export * from './db/schema.js';
 export * from './db/seed.js';
 export * from './db/importSample.js';
+export * from './telemetry.js';
 
 export interface StartServerOptions {
   port?: number;
@@ -25,6 +27,8 @@ export interface RunningServer {
 }
 
 export async function startServer(options: StartServerOptions = {}): Promise<RunningServer> {
+  initApiTelemetry();
+
   const databaseUrl = options.databaseUrl ?? process.env.DATABASE_URL;
   let db: AppDatabase;
   let closeDb: (() => Promise<void>) | undefined;
@@ -61,6 +65,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
           if (closeDb) {
             await closeDb();
           }
+          await shutdownApiTelemetry();
         },
       });
     });

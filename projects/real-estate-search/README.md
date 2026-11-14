@@ -19,7 +19,8 @@ A full-stack, production-grade real estate search application featuring a reacti
    - [Coverage Reporting](#coverage-reporting)
    - [End-to-End (E2E) Browser Tests with Playwright](#end-to-end-e2e-browser-tests-with-playwright)
 6. [Containerization & Docker Compose](#containerization--docker-compose)
-7. [GraphQL API Reference](#graphql-api-reference)
+7. [Observability (OpenTelemetry Tracing & Logging)](#observability-opentelemetry-tracing--logging)
+8. [GraphQL API Reference](#graphql-api-reference)
 
 ---
 
@@ -198,8 +199,9 @@ The application includes production-ready Docker containers and an orchestrating
 ### Services
 
 - **`db`**: `postgres:16-alpine` database with automated healthcheck (`pg_isready -U realestate -d realestate`) on port `5432`.
-- **`api`**: `node:22-alpine` container running the GraphQL Yoga server on port `4000`, connected to `db` via `DATABASE_URL`.
-- **`ui`**: Multi-stage build (`node:22-alpine` builder + `nginx:alpine` runtime) serving the optimized static assets on port `8080` with Nginx reverse proxying `/graphql` to `http://api:4000/graphql`.
+- **`jaeger`**: `jaegertracing/all-in-one:latest` with OTLP collector enabled (`COLLECTOR_OTLP_ENABLED: "true"`), exposing Jaeger UI on port `16686`, OTLP gRPC on port `4317`, and OTLP HTTP on port `4318`.
+- **`api`**: `node:22-alpine` container running the GraphQL Yoga server on port `4000`, connected to `db` via `DATABASE_URL` and exporting OTLP traces to `jaeger` (`OTEL_SERVICE_NAME=real-estate-api`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://jaeger:4318/v1/traces`).
+- **`ui`**: Multi-stage build (`node:22-alpine` builder + `nginx:alpine` runtime) serving the optimized static assets on port `8080` with Nginx reverse proxying `/graphql` to `http://api:4000/graphql` and `/v1/traces` to `http://jaeger:4318/v1/traces`.
 
 ### Running with Docker Compose
 
@@ -212,6 +214,8 @@ docker compose up --build
 Access the services:
 - **Web Application**: `http://localhost:8080/`
 - **GraphQL Endpoint / GraphiQL**: `http://localhost:8080/graphql` or direct API at `http://localhost:4000/graphql`
+- **Jaeger Tracing UI**: `http://localhost:16686/`
+- **OTLP HTTP / gRPC Receivers**: `http://localhost:4318` (HTTP) and `localhost:4317` (gRPC)
 - **PostgreSQL**: `localhost:5432` (`user: realestate`, `password: realestate`, `db: realestate`)
 
 To validate Docker Compose configuration syntax without running the daemon:
@@ -219,6 +223,34 @@ To validate Docker Compose configuration syntax without running the daemon:
 ```bash
 docker compose config
 ```
+
+---
+
+## Observability (OpenTelemetry Tracing & Logging)
+
+Both `@real-estate/ui` and `@real-estate/api` are instrumented with OpenTelemetry tracing and trace-correlated structured JSON logging:
+
+### End-to-End Distributed Tracing
+
+1. **Browser (`real-estate-ui`)**: User search actions (`ui.user.search`) wrap GraphQL client requests (`ui.searchListings` -> `HTTP POST /graphql`) and inject W3C `traceparent` / `tracestate` headers into `fetch('/graphql')`. Browser spans export via OTLP HTTP to `/v1/traces` (proxied to Jaeger by Vite in dev and Nginx in Docker; disabled automatically in Vitest unit tests while keeping `traceparent` generation active).
+2. **API (`real-estate-api`)**: GraphQL Yoga extracts incoming W3C `traceparent` / `tracestate` headers case-insensitively and links `POST /graphql` (`SpanKind.SERVER`) -> `graphql.searchListings` -> `search.execute` -> `search.validateInput`, `search.db.count`, and `search.db.query` under the same distributed `traceId`.
+
+### Trace-Correlated Structured Logging
+
+- Both services emit single-line JSON logs to the console via OpenTelemetry `LoggerProvider` (`SimpleLogRecordProcessor`), enriched with active `traceId`, `spanId`, and `traceFlags`.
+- Every `logUi` and `logApi` call also attaches a matching span event via `addEvent(...)` so logs appear directly on spans inside the Jaeger UI.
+- OTLP log export is only enabled when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is explicitly set (preventing 404s against Jaeger, which only ingests traces).
+
+### OpenTelemetry Environment Variables
+
+| Service | Variable | Default | Description |
+|---|---|---|---|
+| API | `OTEL_SERVICE_NAME` | `real-estate-api` | Resource `service.name` for API traces and logs. |
+| API | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | *(unset)* | Explicit OTLP HTTP traces endpoint (e.g. `http://jaeger:4318/v1/traces`). |
+| API | `OTEL_EXPORTER_OTLP_ENDPOINT` | *(unset)* | Base OTLP endpoint; `/v1/traces` is appended when traces endpoint is unset. |
+| API | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | *(unset)* | Optional explicit OTLP HTTP logs endpoint. |
+| UI | `VITE_OTEL_SERVICE_NAME` | `real-estate-ui` | Resource `service.name` for browser traces and logs. |
+| UI | `VITE_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `/v1/traces` | Browser OTLP HTTP traces endpoint. |
 
 ---
 

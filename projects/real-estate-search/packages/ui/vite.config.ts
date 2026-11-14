@@ -38,6 +38,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/graphql': 'http://localhost:4000',
+      '/v1/traces': 'http://localhost:4318',
     },
   },
   test: {
@@ -48,7 +49,7 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
       include: ['src/**/*.ts', 'src/**/*.tsx'],
-      exclude: ['src/main.tsx', 'src/test-setup.ts', 'src/**/__tests__/**'],
+      exclude: ['src/main.tsx', 'src/test-setup.ts', 'src/**/*.d.ts', 'src/**/__tests__/**'],
       thresholds: {
         lines: 90,
         functions: 90,

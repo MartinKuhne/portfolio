@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { context, SpanStatusCode, trace } from '@opentelemetry/api';
 import { Alert, Container, Typography } from '@mui/material';
 import {
   type Listing,
@@ -11,6 +12,9 @@ import { fetchSearchListings } from './api/searchClient.js';
 import { ListingResults } from './components/ListingResults.js';
 import { PaginationBar } from './components/PaginationBar.js';
 import { SearchForm, type SearchFormState } from './components/SearchForm.js';
+import { getTracer, logUi } from './telemetry.js';
+
+type SearchTriggerAction = 'search' | 'reset' | 'previous_page' | 'next_page';
 
 const DEFAULT_FORM_STATE: SearchFormState = {
   minPrice: '',
@@ -58,7 +62,7 @@ export function App({
   const activeFormRef = useRef<SearchFormState>(DEFAULT_FORM_STATE);
 
   const runSearch = useCallback(
-    async (form: SearchFormState, page: number) => {
+    async (form: SearchFormState, page: number, action: SearchTriggerAction) => {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
@@ -68,9 +72,31 @@ export function App({
       const requestId = ++requestIdRef.current;
       setLoading(true);
 
+      const actionSpan = getTracer().startSpan('ui.user.search', {
+        attributes: {
+          'ui.action': action,
+          'search.page': page,
+        },
+      });
+      const actionCtx = trace.setSpan(context.active(), actionSpan);
+
+      logUi('INFO', 'ui.search.submitted', { 'ui.action': action, 'search.page': page }, actionCtx);
+
       const rawInput = toRawSearchInput(form, page);
       const validation = validateSearchInput(rawInput);
       if (!validation.ok) {
+        actionSpan.setStatus({ code: SpanStatusCode.ERROR, message: validation.error.message });
+        logUi(
+          'WARN',
+          'ui.search.client_validation_failed',
+          {
+            'ui.action': action,
+            'error.code': validation.error.code,
+            'error.field': validation.error.field ?? '',
+          },
+          actionCtx
+        );
+        actionSpan.end();
         if (requestId === requestIdRef.current) {
           setListings([]);
           setPagination(null);
@@ -82,8 +108,16 @@ export function App({
       }
 
       try {
-        const response = await searchFn(rawInput, controller.signal);
+        const response = await context.with(actionCtx, () =>
+          searchFn(rawInput, controller.signal)
+        );
         if (requestId !== requestIdRef.current) {
+          logUi(
+            'INFO',
+            'ui.search.stale_discarded',
+            { 'ui.action': action, 'search.page': page },
+            actionCtx
+          );
           return;
         }
         setHasSearched(true);
@@ -91,23 +125,54 @@ export function App({
           setListings(response.listings);
           setPagination(response.pagination);
           setError(null);
+          logUi(
+            'INFO',
+            'ui.search.results_rendered',
+            { 'ui.action': action, 'search.returnedCount': response.listings.length },
+            actionCtx
+          );
         } else {
           setListings([]);
           setPagination(null);
           setError(response.error.message);
+          actionSpan.setStatus({ code: SpanStatusCode.ERROR, message: response.error.message });
+          logUi(
+            'WARN',
+            'ui.search.error_rendered',
+            { 'ui.action': action, 'error.code': response.error.code },
+            actionCtx
+          );
         }
       } catch (err: unknown) {
         if ((err as { name?: string })?.name === 'AbortError') {
+          logUi('INFO', 'ui.search.request_aborted', { 'ui.action': action }, actionCtx);
           return;
         }
         if (requestId !== requestIdRef.current) {
+          logUi(
+            'INFO',
+            'ui.search.stale_discarded',
+            { 'ui.action': action, 'search.page': page },
+            actionCtx
+          );
           return;
         }
+        const message = err instanceof Error ? err.message : 'An unexpected error occurred.';
+        const errorObj = err instanceof Error ? err : new Error(message);
+        actionSpan.recordException(errorObj);
+        actionSpan.setStatus({ code: SpanStatusCode.ERROR, message });
+        logUi(
+          'ERROR',
+          'ui.search.unexpected_error',
+          { 'ui.action': action, 'error.message': message },
+          actionCtx
+        );
         setHasSearched(true);
         setListings([]);
         setPagination(null);
-        setError(err instanceof Error ? err.message : 'An unexpected error occurred.');
+        setError(message);
       } finally {
+        actionSpan.end();
         if (requestId === requestIdRef.current) {
           setLoading(false);
         }
@@ -130,24 +195,24 @@ export function App({
 
   const handleSearch = () => {
     activeFormRef.current = formState;
-    runSearch(formState, 1);
+    runSearch(formState, 1, 'search');
   };
 
   const handleReset = () => {
     setFormState(DEFAULT_FORM_STATE);
     activeFormRef.current = DEFAULT_FORM_STATE;
-    runSearch(DEFAULT_FORM_STATE, 1);
+    runSearch(DEFAULT_FORM_STATE, 1, 'reset');
   };
 
   const handlePreviousPage = () => {
     if (pagination && pagination.page > 1) {
-      runSearch(activeFormRef.current, pagination.page - 1);
+      runSearch(activeFormRef.current, pagination.page - 1, 'previous_page');
     }
   };
 
   const handleNextPage = () => {
     if (pagination && pagination.page < pagination.totalPages) {
-      runSearch(activeFormRef.current, pagination.page + 1);
+      runSearch(activeFormRef.current, pagination.page + 1, 'next_page');
     }
   };
 

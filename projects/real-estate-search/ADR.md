@@ -96,3 +96,18 @@ This document records the architectural decisions and implementation rulings mad
   3. Configure `db` (`postgres:16-alpine`) with a `pg_isready` healthcheck and gate `api` startup on `condition: service_healthy`.
 - **Consequences:**
   - Single-command startup (`docker compose up --build`) brings up Postgres (port 5432), API (port 4000), and UI (port 8080) with zero cross-origin issues in production.
+
+---
+
+## ADR-008: OpenTelemetry Tracing, Trace-Correlated Logging, and W3C Traceparent Propagation with Jaeger
+
+- **Status:** Accepted
+- **Context:** Operators need end-to-end visibility across browser search interactions, GraphQL HTTP handling, input validation, and PostgreSQL queries (`COUNT` and ranked `SELECT`), with browser-to-API trace continuity and trace-correlated logs.
+- **Decision:**
+  1. Instrument `@real-estate/api` ([telemetry.ts](./packages/api/src/telemetry.ts)) with `NodeTracerProvider`, `W3CTraceContextPropagator`, and `LoggerProvider` emitting single-line JSON console logs plus span events (`addEvent`). OTLP trace export activates when `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is configured; OTLP log export only activates when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is explicitly set (avoiding `/v1/logs` 404s against Jaeger).
+  2. Instrument GraphQL Yoga ([server.ts](./packages/api/src/graphql/server.ts)) via its `instrumentation.request` and `onResponse` hooks to extract incoming W3C `traceparent`/`tracestate` headers case-insensitively, create `SpanKind.SERVER` spans, allow `traceparent`/`tracestate` in CORS preflight headers, and instrument search execution ([executeSearch.ts](./packages/api/src/search/executeSearch.ts)) with child spans (`search.execute`, `search.validateInput`, `search.db.count`, `search.db.query`).
+  3. Instrument `@real-estate/ui` ([telemetry.ts](./packages/ui/src/telemetry.ts), [searchClient.ts](./packages/ui/src/api/searchClient.ts), [App.tsx](./packages/ui/src/App.tsx)) with `WebTracerProvider`, `SimpleSpanProcessor`, and `LoggerProvider`, injecting W3C `traceparent`/`tracestate` headers into `fetch('/graphql')` and passing explicit span contexts across async boundaries so browser `StackContextManager` never loses trace correlation across `await`.
+  4. Add `jaeger` (`jaegertracing/all-in-one:latest`, `COLLECTOR_OTLP_ENABLED=true`) to [docker-compose.yml](./docker-compose.yml) on ports `16686`, `4317`, and `4318`, and proxy `/v1/traces` through both [vite.config.ts](./packages/ui/vite.config.ts) and [nginx.conf](./packages/ui/nginx.conf).
+- **Consequences:**
+  - Every user search produces a single unified trace in Jaeger spanning `real-estate-ui` -> `real-estate-api` -> PostgreSQL queries, with matching `traceId`/`spanId` fields in both browser and server JSON logs.
+  - Network OTLP export is skipped automatically in `MODE === 'test'` and when OTLP endpoints are unset, keeping unit tests fast and deterministic while still verifying real W3C `traceparent` generation and extraction.

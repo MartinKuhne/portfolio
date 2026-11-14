@@ -1,11 +1,27 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetchSearchListings } from '../api/searchClient.js';
+import { initUiTelemetry, shutdownUiTelemetry } from '../telemetry.js';
 
 describe('fetchSearchListings (searchClient)', () => {
   const originalFetch = globalThis.fetch;
+  const memoryExporter = new InMemorySpanExporter();
+
+  beforeAll(() => {
+    initUiTelemetry({
+      enableNetworkExport: false,
+      spanProcessors: [new SimpleSpanProcessor(memoryExporter)],
+    });
+  });
+
+  afterAll(async () => {
+    await shutdownUiTelemetry();
+  });
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    memoryExporter.reset();
   });
 
   afterEach(() => {
@@ -60,10 +76,25 @@ describe('fetchSearchListings (searchClient)', () => {
       '/graphql',
       expect.objectContaining({
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: expect.objectContaining({
+          'Content-Type': 'application/json',
+          traceparent: expect.stringMatching(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/),
+        }),
       })
     );
     expect(res).toEqual(mockData);
+
+    const spans = memoryExporter.getFinishedSpans();
+    const httpSpan = spans.find((s) => s.name === 'HTTP POST /graphql');
+    const uiSpan = spans.find((s) => s.name === 'ui.searchListings');
+    expect(httpSpan).toBeDefined();
+    expect(uiSpan).toBeDefined();
+    expect(httpSpan?.spanContext().traceId).toBe(uiSpan?.spanContext().traceId);
+    expect(httpSpan?.parentSpanContext?.spanId).toBe(uiSpan?.spanContext().spanId);
+    const sentHeaders = mockFetch.mock.calls[0]?.[1]?.headers as Record<string, string>;
+    expect(sentHeaders.traceparent).toBe(
+      `00-${httpSpan?.spanContext().traceId}-${httpSpan?.spanContext().spanId}-01`
+    );
   });
 
   it('handles HTTP 400 error payload returned by server (REQ-ERR-001)', async () => {

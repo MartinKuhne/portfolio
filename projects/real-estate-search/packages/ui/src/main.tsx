@@ -2,6 +2,9 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { CssBaseline, ThemeProvider, createTheme } from '@mui/material';
 import { App } from './App.js';
+import { initUiTelemetry } from './telemetry.js';
+
+initUiTelemetry();
 
 const theme = createTheme({
   palette: {
