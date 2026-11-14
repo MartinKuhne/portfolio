@@ -60,11 +60,20 @@ export const typeDefs = /* GraphQL */ `
   }
 
   type Listing {
+    internalId: ID
     id: ID!
+    source: String
     address: String!
     city: String!
+    state: String
+    zip: String
     price: Int!
     bedrooms: Int!
+    bathrooms: Float
+    sqft: Int
+    latitude: Float
+    longitude: Float
+    status: String
     description: String!
     listedDate: String!
     relevanceScore: Float!
@@ -192,7 +201,15 @@ export function createGraphqlApp(
               parentContext,
               async (span) => {
                 try {
-                  await wrapped();
+                  return await wrapped();
+                } catch (err) {
+                  const error = err instanceof Error ? err : new Error(String(err));
+                  span.recordException(error);
+                  span.setStatus({
+                    code: SpanStatusCode.ERROR,
+                    message: error.message,
+                  });
+                  throw err;
                 } finally {
                   span.end();
                 }
@@ -230,10 +247,6 @@ export function createGraphqlApp(
               'http.response.status_code': finalStatus,
             });
           } else if (finalStatus >= 400) {
-            activeSpan?.setStatus({
-              code: SpanStatusCode.ERROR,
-              message: `HTTP ${finalStatus}`,
-            });
             logApi(SeverityNumber.WARN, 'WARN', 'http.request.rejected', {
               'http.request.method': method,
               'url.path': pathname,

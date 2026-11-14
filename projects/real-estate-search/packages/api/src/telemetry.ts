@@ -2,6 +2,7 @@ import {
   context,
   propagation,
   trace,
+  SpanKind,
   SpanStatusCode,
   type Attributes,
   type Context,
@@ -20,7 +21,7 @@ import {
   type LogRecordProcessor,
   type ReadableLogRecord,
 } from '@opentelemetry/sdk-logs';
-import { SimpleSpanProcessor, type SpanProcessor } from '@opentelemetry/sdk-trace-base';
+import { BatchSpanProcessor, type SpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 
@@ -114,7 +115,11 @@ export function initApiTelemetry(options: InitApiTelemetryOptions = {}): void {
   const spanProcessors: SpanProcessor[] = [...(options.spanProcessors ?? [])];
   const tracesEndpoint = resolveTracesEndpoint();
   if (tracesEndpoint) {
-    spanProcessors.push(new SimpleSpanProcessor(new OTLPTraceExporter({ url: tracesEndpoint })));
+    spanProcessors.push(
+      new BatchSpanProcessor(new OTLPTraceExporter({ url: tracesEndpoint }), {
+        scheduledDelayMillis: 500,
+      })
+    );
   }
 
   const propagator = new W3CTraceContextPropagator();
@@ -254,9 +259,10 @@ export function logApi(
 export async function withApiSpan<T>(
   name: string,
   attributes: Attributes,
-  fn: (span: Span) => Promise<T> | T
+  fn: (span: Span) => Promise<T> | T,
+  kind: SpanKind = SpanKind.INTERNAL
 ): Promise<T> {
-  return getApiTracer().startActiveSpan(name, { attributes }, async (span) => {
+  return getApiTracer().startActiveSpan(name, { kind, attributes }, async (span) => {
     try {
       return await fn(span);
     } catch (err) {

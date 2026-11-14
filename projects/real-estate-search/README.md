@@ -141,7 +141,7 @@ You can run the API and UI independently or concurrently:
   ```bash
   npm run db:import -w @real-estate/api
   ```
-  This imports the provided 12-listing dataset (`sample_listings.json`), maps multi-part address fields, and inserts records idempotently (`ON CONFLICT DO NOTHING`). Inside Docker, `sample_listings.json` is packaged at `/app/sample_listings.json` and can be imported via `docker compose exec api npm run db:import`.
+  This imports the provided 12-listing dataset (`sample_listings.json`), maps all listing attributes (`source`, `state`, `zip`, `bathrooms`, `sqft`, `latitude`, `longitude`, native PostgreSQL `POINT(longitude, latitude)` `location`, and `status`), and inserts records idempotently (`ON CONFLICT (id, source) DO NOTHING`). Inside Docker, `sample_listings.json` is packaged at `/app/sample_listings.json` and can be imported via `docker compose exec api npm run db:import`.
 
 ---
 
@@ -266,11 +266,20 @@ query SearchListings($input: SearchListingsInput) {
   searchListings(input: $input) {
     ok
     listings {
+      internalId
       id
+      source
       address
       city
+      state
+      zip
       price
       bedrooms
+      bathrooms
+      sqft
+      latitude
+      longitude
+      status
       description
       listedDate
       relevanceScore

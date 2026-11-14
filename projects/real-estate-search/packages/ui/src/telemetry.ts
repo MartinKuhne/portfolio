@@ -17,7 +17,7 @@ import {
   type LogRecordProcessor,
   type ReadableLogRecord,
 } from '@opentelemetry/sdk-logs';
-import { SimpleSpanProcessor, type SpanProcessor } from '@opentelemetry/sdk-trace-base';
+import { BatchSpanProcessor, type SpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { WebTracerProvider } from '@opentelemetry/sdk-trace-web';
 import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 
@@ -101,7 +101,11 @@ export function initUiTelemetry(options: InitUiTelemetryOptions = {}): void {
 
   const spanProcessors: SpanProcessor[] = [...(options.spanProcessors ?? [])];
   if (enableNetworkExport) {
-    spanProcessors.push(new SimpleSpanProcessor(new OTLPTraceExporter({ url: tracesEndpoint })));
+    spanProcessors.push(
+      new BatchSpanProcessor(new OTLPTraceExporter({ url: tracesEndpoint }), {
+        scheduledDelayMillis: 250,
+      })
+    );
   }
 
   const propagator = new W3CTraceContextPropagator();

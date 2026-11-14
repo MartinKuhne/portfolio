@@ -1,3 +1,4 @@
+import { SpanKind, SpanStatusCode } from '@opentelemetry/api';
 import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetchSearchListings } from '../api/searchClient.js';
@@ -89,6 +90,8 @@ describe('fetchSearchListings (searchClient)', () => {
     const uiSpan = spans.find((s) => s.name === 'ui.searchListings');
     expect(httpSpan).toBeDefined();
     expect(uiSpan).toBeDefined();
+    expect(uiSpan?.kind).toBe(SpanKind.INTERNAL);
+    expect(httpSpan?.kind).toBe(SpanKind.CLIENT);
     expect(httpSpan?.spanContext().traceId).toBe(uiSpan?.spanContext().traceId);
     expect(httpSpan?.parentSpanContext?.spanId).toBe(uiSpan?.spanContext().spanId);
     const sentHeaders = mockFetch.mock.calls[0]?.[1]?.headers as Record<string, string>;
@@ -209,5 +212,42 @@ describe('fetchSearchListings (searchClient)', () => {
     await expect(
       fetchSearchListings({ page: 1, pageSize: 10 }, controller.signal)
     ).rejects.toThrow('The operation was aborted');
+  });
+
+  it('handles non-JSON HTML 502 proxy error responses with clean error message and ERROR spans', async () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => {
+        throw new SyntaxError("Unexpected token '<', \"<html>502 Bad Gateway\" is not valid JSON");
+      },
+    });
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
+
+    const res = await fetchSearchListings({ page: 1, pageSize: 10 });
+
+    expect(res).toEqual({
+      ok: false,
+      listings: [],
+      pagination: null,
+      error: {
+        code: 'INTERNAL_ERROR',
+        message: 'Search service returned an unexpected response (HTTP 502).',
+        field: null,
+      },
+    });
+
+    const spans = memoryExporter.getFinishedSpans();
+    const httpSpan = spans.find((s) => s.name === 'HTTP POST /graphql');
+    const uiSpan = spans.find((s) => s.name === 'ui.searchListings');
+    expect(httpSpan?.status.code).toBe(SpanStatusCode.ERROR);
+    expect(uiSpan?.status.code).toBe(SpanStatusCode.ERROR);
+
+    const logEntries = consoleSpy.mock.calls.map((c) => JSON.parse(String(c[0])));
+    const invalidLog = logEntries.find((l) => l.body === 'ui.search.invalid_response');
+    expect(invalidLog).toBeDefined();
+    expect(invalidLog.severityText).toBe('ERROR');
+    expect(invalidLog.attributes['http.response.status_code']).toBe(502);
   });
 });

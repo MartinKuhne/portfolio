@@ -42,7 +42,7 @@ export async function fetchSearchListings(
 ): Promise<SearchResponse> {
   const tracer = getTracer();
   const uiSpan = tracer.startSpan('ui.searchListings', {
-    kind: SpanKind.CLIENT,
+    kind: SpanKind.INTERNAL,
     attributes: {
       'search.page': String(rawInput.page ?? 1),
       'search.pageSize': String(rawInput.pageSize ?? 10),
@@ -114,10 +114,40 @@ export async function fetchSearchListings(
       httpSpan.setAttribute('http.response.status_code', response.status);
     }
 
-    const json = (await response.json()) as {
+    let json: {
       data?: { searchListings?: SearchResponse };
       errors?: Array<{ message: string }>;
     };
+    try {
+      json = (await response.json()) as {
+        data?: { searchListings?: SearchResponse };
+        errors?: Array<{ message: string }>;
+      };
+    } catch (parseErr: unknown) {
+      const error = parseErr instanceof Error ? parseErr : new Error(String(parseErr));
+      const message = `Search service returned an unexpected response (HTTP ${response.status}).`;
+      httpSpan.recordException(error);
+      httpSpan.setStatus({ code: SpanStatusCode.ERROR, message });
+      uiSpan.recordException(error);
+      uiSpan.setAttribute('search.ok', false);
+      uiSpan.setStatus({ code: SpanStatusCode.ERROR, message });
+      logUi(
+        'ERROR',
+        'ui.search.invalid_response',
+        { 'http.response.status_code': response.status },
+        httpCtx
+      );
+      return {
+        ok: false,
+        listings: [],
+        pagination: null,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message,
+          field: null,
+        },
+      };
+    }
 
     if (json.data?.searchListings) {
       const payload = json.data.searchListings;

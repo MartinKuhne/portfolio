@@ -179,7 +179,14 @@ describe('API OpenTelemetry tracing and logging', () => {
     }
 
     const dbCountSpan = spans.find((s) => s.name === 'search.db.count');
+    expect(dbCountSpan?.kind).toBe(SpanKind.CLIENT);
     expect(dbCountSpan?.attributes['db.system']).toBe('postgresql');
+    expect(dbCountSpan?.attributes['db.collection.name']).toBe('listings');
+
+    const dbQuerySpan = spans.find((s) => s.name === 'search.db.query');
+    expect(dbQuerySpan?.kind).toBe(SpanKind.CLIENT);
+    expect(dbQuerySpan?.attributes['db.system']).toBe('postgresql');
+    expect(dbQuerySpan?.attributes['db.collection.name']).toBe('listings');
 
     const logEntries = consoleSpy.mock.calls.map((call) => JSON.parse(String(call[0])));
     expect(logEntries.length).toBeGreaterThanOrEqual(3);
@@ -193,13 +200,13 @@ describe('API OpenTelemetry tracing and logging', () => {
     expect(logEntries.map((e) => e.body)).toContain('http.request.completed');
   });
 
-  it('records error status and logs WARN/ERROR on 400 validation errors and 500 internal errors', async () => {
+  it('leaves SERVER span UNSET on 400 validation errors with WARN log and sets ERROR on 500 internal errors', async () => {
     const memoryExporter = new InMemorySpanExporter();
     initApiTelemetry({
       spanProcessors: [new SimpleSpanProcessor(memoryExporter)],
     });
 
-    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const consoleErrSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const yoga = createGraphqlApp(db);
@@ -217,7 +224,10 @@ describe('API OpenTelemetry tracing and logging', () => {
 
     const serverSpan400 = memoryExporter.getFinishedSpans().find((s) => s.name === 'POST /graphql');
     expect(serverSpan400?.attributes['http.response.status_code']).toBe(400);
-    expect(serverSpan400?.status.code).toBe(SpanStatusCode.ERROR);
+    expect(serverSpan400?.status.code).toBe(SpanStatusCode.UNSET);
+
+    const warnLogs = consoleSpy.mock.calls.map((call) => JSON.parse(String(call[0])));
+    expect(warnLogs.some((l) => l.body === 'http.request.rejected' && l.severityText === 'WARN')).toBe(true);
 
     memoryExporter.reset();
     const brokenDb = {
@@ -239,6 +249,33 @@ describe('API OpenTelemetry tracing and logging', () => {
     const serverSpan500 = memoryExporter.getFinishedSpans().find((s) => s.name === 'POST /graphql');
     expect(serverSpan500?.attributes['http.response.status_code']).toBe(500);
     expect(serverSpan500?.status.code).toBe(SpanStatusCode.ERROR);
+  });
+
+  it('records exception and sets ERROR status when instrumentation.request wrapped call throws', async () => {
+    const memoryExporter = new InMemorySpanExporter();
+    initApiTelemetry({
+      spanProcessors: [new SimpleSpanProcessor(memoryExporter)],
+    });
+
+    vi.spyOn(trace, 'getActiveSpan').mockImplementationOnce(() => {
+      throw new Error('Unhandled instrumentation failure');
+    });
+
+    const yoga = createGraphqlApp(db);
+    await expect(
+      yoga.fetch('http://localhost:4000/graphql', {
+        method: 'OPTIONS',
+        headers: {
+          Origin: 'http://localhost:5173',
+          'Access-Control-Request-Method': 'POST',
+        },
+      })
+    ).rejects.toThrow('Unhandled instrumentation failure');
+
+    const serverSpan = memoryExporter.getFinishedSpans().find((s) => s.name === 'OPTIONS /graphql');
+    expect(serverSpan?.status.code).toBe(SpanStatusCode.ERROR);
+    expect(serverSpan?.status.message).toBe('Unhandled instrumentation failure');
+    expect(serverSpan?.events.some((e) => e.name === 'exception')).toBe(true);
   });
 
   it('allows traceparent and tracestate headers in CORS preflight responses', async () => {

@@ -1,10 +1,11 @@
+import { EventEmitter } from 'node:events';
 import { Kind } from 'graphql';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createTestDatabase, type AppDatabase } from '../db/client.js';
 import * as clientModule from '../db/client.js';
 import { seedDatabase } from '../db/seed.js';
 import { createGraphqlApp, JSONScalar, parseLiteral } from '../graphql/server.js';
-import { startServer } from '../index.js';
+import { registerShutdownHandlers, startServer } from '../index.js';
 import * as searchService from '../search/executeSearch.js';
 
 describe('GraphQL searchListings endpoint', () => {
@@ -29,7 +30,25 @@ describe('GraphQL searchListings endpoint', () => {
         query: `query Search($input: SearchListingsInput!) {
           searchListings(input: $input) {
             ok
-            listings { id address city price bedrooms description listedDate relevanceScore }
+            listings {
+              internalId
+              id
+              source
+              address
+              city
+              state
+              zip
+              price
+              bedrooms
+              bathrooms
+              sqft
+              latitude
+              longitude
+              status
+              description
+              listedDate
+              relevanceScore
+            }
             pagination { page pageSize totalResults totalPages }
             error { code message field totalPages }
           }
@@ -41,6 +60,16 @@ describe('GraphQL searchListings endpoint', () => {
     expect(response.status).toBe(200);
     expect(body.data.searchListings.ok).toBe(true);
     expect(body.data.searchListings.listings.length).toBeGreaterThan(0);
+    const first = body.data.searchListings.listings[0];
+    expect(first.internalId).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(first.source).toBe('SEED');
+    expect(first.state).toBe('TX');
+    expect(first.zip).toMatch(/^\d{5}$/);
+    expect(typeof first.bathrooms).toBe('number');
+    expect(typeof first.sqft).toBe('number');
+    expect(typeof first.latitude).toBe('number');
+    expect(typeof first.longitude).toBe('number');
+    expect(first.status).toBe('active');
     expect(body.data.searchListings.pagination.page).toBe(1);
     expect(body.data.searchListings.pagination.pageSize).toBe(5);
     expect(body.data.searchListings.error).toBeNull();
@@ -434,5 +463,39 @@ describe('startServer lifecycle and HTTP execution', () => {
   it('rejects startServer when listen fails', async () => {
     // Attempting to listen on an invalid port like -1 causes an immediate error
     await expect(startServer({ port: -1 })).rejects.toThrow();
+  });
+
+  it('registerShutdownHandlers stops server once on SIGTERM and exits with 0', async () => {
+    const emitter = new EventEmitter();
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const onExit = vi.fn();
+
+    registerShutdownHandlers({ stop }, emitter, onExit);
+    emitter.emit('SIGTERM');
+    emitter.emit('SIGINT');
+    emitter.emit('SIGTERM');
+
+    await vi.waitFor(() => {
+      expect(onExit).toHaveBeenCalledWith(0);
+    });
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(onExit).toHaveBeenCalledTimes(1);
+  });
+
+  it('registerShutdownHandlers logs error and exits with 1 when stop fails on SIGINT', async () => {
+    const emitter = new EventEmitter();
+    const stopError = new Error('close failure');
+    const stop = vi.fn().mockRejectedValue(stopError);
+    const onExit = vi.fn();
+    const consoleErrSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    registerShutdownHandlers({ stop }, emitter, onExit);
+    emitter.emit('SIGINT');
+
+    await vi.waitFor(() => {
+      expect(onExit).toHaveBeenCalledWith(1);
+    });
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(consoleErrSpy).toHaveBeenCalledWith('Error during graceful shutdown:', stopError);
   });
 });

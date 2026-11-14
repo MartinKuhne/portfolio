@@ -1,13 +1,26 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createTestDatabase, type AppDatabase } from '../db/client.js';
+import { PGlite } from '@electric-sql/pglite';
+import { sql } from 'drizzle-orm';
+import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
+import pg from 'pg';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import {
+  createPostgresDatabase,
+  createTestDatabase,
+  ensureSchema,
+  type AppDatabase,
+} from '../db/client.js';
 import {
   importSampleListings,
   resolveSampleListingsPath,
 } from '../db/importSample.js';
+import * as schema from '../db/schema.js';
+import { listingsTable } from '../db/schema.js';
 import { executeSearch } from '../search/executeSearch.js';
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 describe('importSampleListings and resolveSampleListingsPath', () => {
   let db: AppDatabase;
@@ -20,6 +33,10 @@ describe('importSampleListings and resolveSampleListingsPath', () => {
 
   afterAll(() => {
     fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('resolves explicit paths directly and finds repository sample_listings.json by default', () => {
@@ -49,16 +66,41 @@ describe('importSampleListings and resolveSampleListingsPath', () => {
     expect(searchRes.pagination?.totalResults).toBe(12);
   });
 
-  it('correctly maps multi-part addresses and allows searching across imported cities', async () => {
+  it('correctly maps multi-part addresses, all sample fields, and location POINT across imported cities', async () => {
     // Check Springfield listings
     const springfield = await executeSearch(db, { city: 'Springfield' });
     expect(springfield.ok).toBe(true);
     expect(springfield.listings.length).toBeGreaterThan(0);
     const firstSpringfield = springfield.listings.find((l) => l.id === 'A1');
     expect(firstSpringfield).toBeDefined();
+    expect(firstSpringfield?.internalId).toMatch(UUID_REGEX);
+    expect(firstSpringfield?.source).toBe('MLS_A');
     expect(firstSpringfield?.address).toBe('123 Main St, Apt 4B, Springfield, VA 22150');
+    expect(firstSpringfield?.state).toBe('VA');
+    expect(firstSpringfield?.zip).toBe('22150');
     expect(firstSpringfield?.price).toBe(450000);
     expect(firstSpringfield?.bedrooms).toBe(2);
+    expect(firstSpringfield?.bathrooms).toBe(1.5);
+    expect(firstSpringfield?.sqft).toBe(980);
+    expect(firstSpringfield?.latitude).toBe(38.7893);
+    expect(firstSpringfield?.longitude).toBe(-77.1873);
+    expect(firstSpringfield?.status).toBe('active');
+    expect(firstSpringfield?.listedDate).toBe('2026-08-29T00:00:00.000Z');
+    expect(firstSpringfield?.description).toBe(
+      'Bright top-floor condo near shops and transit. Pet friendly.'
+    );
+
+    const chantilly = await executeSearch(db, { city: 'Chantilly' });
+    expect(chantilly.ok).toBe(true);
+    expect(chantilly.listings[0]?.id).toBe('A7');
+    expect(chantilly.listings[0]?.status).toBe('pending');
+    expect(chantilly.listings[0]?.bathrooms).toBe(2.5);
+    expect(chantilly.listings[0]?.sqft).toBe(1950);
+
+    // Verify PostgreSQL POINT(longitude, latitude) storage directly in listingsTable
+    const dbRows = await db.select().from(listingsTable);
+    const a1Row = dbRows.find((r) => r.id === 'A1' && r.source === 'MLS_A');
+    expect(a1Row?.location).toEqual({ x: -77.1873, y: 38.7893 });
 
     // Check Fairfax listings
     const fairfax = await executeSearch(db, { city: 'Fairfax' });
@@ -147,6 +189,7 @@ describe('importSampleListings and resolveSampleListingsPath', () => {
       { id: '3', address: '123 St', city: 'City', price: 100, bedrooms: 'three' },
       { id: '4', address: '123 St', city: 'City', price: 100, bedrooms: 2, description: 123 },
       { id: '5', address: '123 St', city: 'City', price: 100, bedrooms: 2, description: 'desc', listedDate: 123 },
+      { id: '6', address: '123 St', city: 'City', price: 100, bedrooms: 2, description: 'desc', listedDate: 'not-a-date' },
     ];
 
     for (const inv of invalidRecords) {
@@ -156,5 +199,199 @@ describe('importSampleListings and resolveSampleListingsPath', () => {
         /Invalid listing record/
       );
     }
+  });
+
+  it('rejects invalid optional fields (source, state, zip, status, bathrooms, sqft, latitude, longitude)', async () => {
+    const baseValid = {
+      id: 'OPT-TEST-1',
+      address: '10 Test Way',
+      city: 'McLean',
+      price: 500000,
+      bedrooms: 3,
+      listedDate: '2026-09-01',
+      description: 'Valid base record',
+    };
+
+    const invalidOptionalCases = [
+      { ...baseValid, source: '' },
+      { ...baseValid, source: 123 },
+      { ...baseValid, state: '   ' },
+      { ...baseValid, zip: 22101 },
+      { ...baseValid, status: '' },
+      { ...baseValid, bathrooms: -1 },
+      { ...baseValid, bathrooms: 'two' },
+      { ...baseValid, sqft: -100 },
+      { ...baseValid, sqft: 1250.5 },
+      { ...baseValid, sqft: '1250' },
+      { ...baseValid, latitude: 38.9 }, // missing longitude
+      { ...baseValid, longitude: -77.1 }, // missing latitude
+      { ...baseValid, latitude: 95, longitude: -77.1 },
+      { ...baseValid, latitude: -91, longitude: -77.1 },
+      { ...baseValid, latitude: '38.9', longitude: -77.1 },
+      { ...baseValid, latitude: 38.9, longitude: 185 },
+      { ...baseValid, latitude: 38.9, longitude: -181 },
+      { ...baseValid, latitude: 38.9, longitude: 'bad' },
+    ];
+
+    for (const invalidCase of invalidOptionalCases) {
+      const file = path.join(tempDir, `invalid_opt_${Math.random()}.json`);
+      fs.writeFileSync(file, JSON.stringify([invalidCase]));
+      await expect(importSampleListings(db, file)).rejects.toThrow(/Invalid listing record/);
+    }
+  });
+
+  it('enforces (id, source) composite uniqueness while allowing the same external id across distinct sources', async () => {
+    const isolatedDb = await createTestDatabase();
+
+    const feedA = [
+      {
+        id: 'SHARED-100',
+        source: 'MLS_A',
+        address: '100 Multi Feed Rd',
+        city: 'Arlington',
+        state: 'VA',
+        zip: '22201',
+        price: 600000,
+        bedrooms: 3,
+        bathrooms: 2,
+        sqft: 1500,
+        latitude: 38.8816,
+        longitude: -77.091,
+        listedDate: '2026-09-10',
+        status: 'active',
+        description: 'Feed A listing',
+      },
+    ];
+    const feedB = [
+      {
+        ...feedA[0],
+        source: 'MLS_B',
+        price: 605000,
+        description: 'Feed B listing',
+      },
+    ];
+
+    const fileA = path.join(tempDir, 'feedA.json');
+    const fileB = path.join(tempDir, 'feedB.json');
+    fs.writeFileSync(fileA, JSON.stringify(feedA));
+    fs.writeFileSync(fileB, JSON.stringify(feedB));
+
+    expect(await importSampleListings(isolatedDb, fileA)).toBe(1);
+    expect(await importSampleListings(isolatedDb, fileA)).toBe(0);
+    expect(await importSampleListings(isolatedDb, fileB)).toBe(1);
+
+    const searchRes = await executeSearch(isolatedDb, { city: 'Arlington' });
+    expect(searchRes.ok).toBe(true);
+    expect(searchRes.listings).toHaveLength(2);
+    expect(searchRes.listings[0].internalId).toMatch(UUID_REGEX);
+    expect(searchRes.listings[1].internalId).toMatch(UUID_REGEX);
+    expect(searchRes.listings[0].internalId).not.toBe(searchRes.listings[1].internalId);
+  });
+
+  it('idempotently migrates a legacy id-primary-key listings table inside ensureSchema', async () => {
+    const client = new PGlite();
+    const legacyDb = drizzlePglite(client, { schema });
+
+    await legacyDb.execute(sql.raw(`
+      CREATE TABLE listings (
+        id TEXT PRIMARY KEY,
+        address TEXT NOT NULL,
+        city TEXT NOT NULL,
+        price INTEGER NOT NULL,
+        bedrooms INTEGER NOT NULL,
+        description TEXT NOT NULL,
+        listed_date TEXT NOT NULL
+      );
+    `));
+
+    await legacyDb.execute(sql.raw(`
+      INSERT INTO listings (id, address, city, price, bedrooms, description, listed_date) VALUES
+      ('LST-001', '101 Congress Ave', 'Austin', 450000, 3, 'Legacy seed row', '2026-10-20T00:00:00.000Z'),
+      ('A1', '123 Main St, Apt 4B, Springfield, VA 22150', 'Springfield', 450000, 2, 'Legacy MLS_A row', '2026-08-29T00:00:00.000Z'),
+      ('B7', '123 Main Street, Unit 4B, Springfield, VA 22150', 'Springfield', 452000, 2, 'Legacy MLS_B row', '2026-08-27T00:00:00.000Z');
+    `));
+
+    await ensureSchema(legacyDb);
+    // Run a second time to verify idempotency
+    await ensureSchema(legacyDb);
+
+    const pkResult = await client.query<{ attname: string }>(`
+      SELECT a.attname
+      FROM pg_constraint c
+      JOIN pg_class t ON t.oid = c.conrelid
+      JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(c.conkey)
+      WHERE t.relname = 'listings' AND c.contype = 'p';
+    `);
+    expect(pkResult.rows.map((r) => r.attname)).toEqual(['internal_id']);
+
+    const indexResult = await client.query<{ indexname: string }>(`
+      SELECT indexname FROM pg_indexes WHERE tablename = 'listings';
+    `);
+    const indexNames = indexResult.rows.map((r) => r.indexname);
+    expect(indexNames).toContain('listings_id_source_unique');
+    expect(indexNames).toContain('listings_location_gist');
+
+    const migratedRows = await legacyDb.select().from(listingsTable);
+    expect(migratedRows).toHaveLength(3);
+    const seedRow = migratedRows.find((r) => r.id === 'LST-001');
+    const a1Row = migratedRows.find((r) => r.id === 'A1');
+    const b7Row = migratedRows.find((r) => r.id === 'B7');
+    expect(seedRow?.source).toBe('SEED');
+    expect(seedRow?.internalId).toMatch(UUID_REGEX);
+    expect(a1Row?.source).toBe('MLS_A');
+    expect(a1Row?.internalId).toMatch(UUID_REGEX);
+    expect(b7Row?.source).toBe('MLS_B');
+    expect(b7Row?.internalId).toMatch(UUID_REGEX);
+
+    // Same external id with a different source now inserts cleanly after PK migration
+    await legacyDb
+      .insert(listingsTable)
+      .values({
+        id: 'A1',
+        source: 'MLS_B',
+        address: '123 Main St',
+        city: 'Springfield',
+        price: 451000,
+        bedrooms: 2,
+        description: 'Cross-source row',
+        listedDate: '2026-08-30T00:00:00.000Z',
+      })
+      .onConflictDoNothing({ target: [listingsTable.id, listingsTable.source] });
+
+    const afterInsertRows = await legacyDb.select().from(listingsTable);
+    expect(afterInsertRows).toHaveLength(4);
+  });
+
+  it('normalizes date-only listedDate strings to UTC ISO-8601 timestamps on insert', async () => {
+    const records = [
+      {
+        id: 'DATE-NORM-1',
+        address: '456 Oak Ave',
+        city: 'Herndon',
+        price: 400000,
+        bedrooms: 3,
+        listedDate: '2026-09-01',
+        description: 'Normalized UTC date listing',
+      },
+    ];
+    const file = path.join(tempDir, 'date-norm.json');
+    fs.writeFileSync(file, JSON.stringify(records));
+
+    const count = await importSampleListings(db, file);
+    expect(count).toBe(1);
+
+    const searchRes = await executeSearch(db, { city: 'Herndon' });
+    expect(searchRes.ok).toBe(true);
+    expect(searchRes.listings[0]?.listedDate).toBe('2026-09-01T00:00:00.000Z');
+  });
+
+  it('closes pg.Pool cleanly if ensureSchema fails in createPostgresDatabase', async () => {
+    vi.spyOn(pg.Pool.prototype, 'query').mockRejectedValueOnce(new Error('Schema init failed'));
+    const endSpy = vi.spyOn(pg.Pool.prototype, 'end').mockResolvedValueOnce(undefined as never);
+
+    await expect(
+      createPostgresDatabase('postgres://user:pass@localhost:5432/broken_db')
+    ).rejects.toThrow('Schema init failed');
+    expect(endSpy).toHaveBeenCalledTimes(1);
   });
 });

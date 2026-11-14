@@ -30,11 +30,20 @@ export interface ValidatedSearchInput {
 }
 
 export interface Listing {
+  internalId?: string;
   id: string;
+  source?: string;
   address: string;
   city: string;
+  state?: string | null;
+  zip?: string | null;
   price: number;
   bedrooms: number;
+  bathrooms?: number | null;
+  sqft?: number | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  status?: string;
   description: string;
   listedDate: string;
   relevanceScore: number;

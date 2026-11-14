@@ -72,6 +72,40 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
   });
 }
 
+export type ShutdownSignal = 'SIGTERM' | 'SIGINT';
+
+export interface ShutdownProcess {
+  on(event: ShutdownSignal, listener: () => void): unknown;
+}
+
+/**
+ * Registers SIGTERM and SIGINT handlers that gracefully stop the running server once.
+ */
+export function registerShutdownHandlers(
+  runningServer: Pick<RunningServer, 'stop'>,
+  processRef: ShutdownProcess = process,
+  onExit: (code: number) => void = /* v8 ignore next */ (code) => process.exit(code)
+): void {
+  let shuttingDown = false;
+
+  const handleSignal = async () => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    try {
+      await runningServer.stop();
+      onExit(0);
+    } catch (err) {
+      console.error('Error during graceful shutdown:', err);
+      onExit(1);
+    }
+  };
+
+  processRef.on('SIGTERM', handleSignal);
+  processRef.on('SIGINT', handleSignal);
+}
+
 const isMain =
   Boolean(process.argv[1]) &&
   fileURLToPath(import.meta.url).toLowerCase() === path.resolve(process.argv[1]).toLowerCase();
@@ -79,8 +113,9 @@ const isMain =
 /* v8 ignore start */
 if (isMain) {
   startServer()
-    .then(({ port }) => {
-      console.log(`Server is running on http://localhost:${port}/graphql`);
+    .then((runningServer) => {
+      console.log(`Server is running on http://localhost:${runningServer.port}/graphql`);
+      registerShutdownHandlers(runningServer);
     })
     .catch((err) => {
       console.error('Failed to start server:', err);

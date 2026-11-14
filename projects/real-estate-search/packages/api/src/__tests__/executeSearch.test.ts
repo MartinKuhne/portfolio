@@ -250,6 +250,82 @@ describe('executeSearch domain service', () => {
     expect(res.pagination?.totalResults).toBe(24);
   });
 
+  it('sorts deterministically across duplicate external IDs from different sources and enforces (id, source) uniqueness', async () => {
+    const multiSourceDb = await createTestDatabase();
+
+    await multiSourceDb
+      .insert(listingsTable)
+      .values([
+        {
+          id: 'DUP-001',
+          source: 'MLS_B',
+          address: '100 Main St',
+          city: 'Reston',
+          state: 'VA',
+          zip: '20190',
+          price: 500000,
+          bedrooms: 3,
+          bathrooms: 2.5,
+          sqft: 1800,
+          latitude: 38.9586,
+          longitude: -77.357,
+          location: { x: -77.357, y: 38.9586 },
+          status: 'active',
+          description: 'Duplicate external ID from MLS_B',
+          listedDate: '2026-10-15T00:00:00.000Z',
+        },
+        {
+          id: 'DUP-001',
+          source: 'MLS_A',
+          address: '100 Main St',
+          city: 'Reston',
+          state: 'VA',
+          zip: '20190',
+          price: 500000,
+          bedrooms: 3,
+          bathrooms: 2.5,
+          sqft: 1800,
+          latitude: 38.9586,
+          longitude: -77.357,
+          location: { x: -77.357, y: 38.9586 },
+          status: 'active',
+          description: 'Duplicate external ID from MLS_A',
+          listedDate: '2026-10-15T00:00:00.000Z',
+        },
+      ])
+      .onConflictDoNothing({ target: [listingsTable.id, listingsTable.source] });
+
+    // Re-inserting (DUP-001, MLS_A) should be skipped cleanly
+    await multiSourceDb
+      .insert(listingsTable)
+      .values({
+        id: 'DUP-001',
+        source: 'MLS_A',
+        address: '100 Main St',
+        city: 'Reston',
+        price: 500000,
+        bedrooms: 3,
+        description: 'Should be skipped',
+        listedDate: '2026-10-15T00:00:00.000Z',
+      })
+      .onConflictDoNothing({ target: [listingsTable.id, listingsTable.source] });
+
+    const res = await executeSearch(multiSourceDb, { city: 'Reston', targetBudget: 500000 });
+    expect(res.ok).toBe(true);
+    expect(res.listings).toHaveLength(2);
+    expect(res.listings[0].id).toBe('DUP-001');
+    expect(res.listings[1].id).toBe('DUP-001');
+    expect(res.listings[0].source).toBe('MLS_A');
+    expect(res.listings[1].source).toBe('MLS_B');
+    expect(res.listings[0].internalId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    );
+    expect(res.listings[1].internalId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    );
+    expect(res.listings[0].internalId).not.toBe(res.listings[1].internalId);
+  });
+
   it('initializes and closes postgres database via createPostgresDatabase', async () => {
     const endSpy = vi.fn().mockResolvedValue(undefined);
     const querySpy = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
