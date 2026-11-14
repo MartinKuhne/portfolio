@@ -4,8 +4,8 @@ import {
   DEFAULT_PAGE,
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE,
-  validateSearchInput,
-} from '../validation.js';
+} from '../types.js';
+import { validateSearchInput } from '../validation.js';
 
 describe('validateSearchInput', () => {
   it('applies defaults page=1 and pageSize=10 when omitted (REQ-PAG-002, REQ-PAG-003)', () => {

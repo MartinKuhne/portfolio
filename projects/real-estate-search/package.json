@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "build": "npm run build -w @real-estate/shared && npm run build -w @real-estate/api && npm run build -w @real-estate/ui",
+    "db:import": "npm run db:import -w @real-estate/api",
     "test": "vitest run",
     "test:coverage": "npm run test:coverage -w @real-estate/shared && npm run test:coverage -w @real-estate/api && npm run test:coverage -w @real-estate/ui",
     "test:e2e": "playwright test"

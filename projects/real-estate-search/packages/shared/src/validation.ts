@@ -7,8 +7,6 @@ import {
   type ValidatedSearchInput,
 } from './types.js';
 
-export { DEFAULT_PAGE, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE };
-
 export type ValidationResult =
   | { ok: true; value: ValidatedSearchInput }
   | { ok: false; error: SearchError };

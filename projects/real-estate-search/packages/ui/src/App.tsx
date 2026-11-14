@@ -155,12 +155,12 @@ export function App({
         Real Estate Search
       </Typography>
 
+      {/* Search remains enabled during loading so users can submit a new search and cancel in-flight stale requests */}
       <SearchForm
         values={formState}
         onChange={handleFieldChange}
         onSubmit={handleSearch}
         onReset={handleReset}
-        loading={loading}
       />
 
       {error && (

@@ -3,7 +3,7 @@ FROM node:22-alpine
 WORKDIR /app
 
 # Copy root workspace manifests and configs
-COPY package.json package-lock.json tsconfig.base.json ./
+COPY package.json package-lock.json tsconfig.base.json sample_listings.json ./
 COPY packages/shared/package.json ./packages/shared/
 COPY packages/api/package.json ./packages/api/
 COPY packages/ui/package.json ./packages/ui/

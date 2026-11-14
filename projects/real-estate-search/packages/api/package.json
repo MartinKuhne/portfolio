@@ -8,6 +8,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "node dist/index.js",
+    "db:import": "node dist/db/importSample.js",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage"
   },

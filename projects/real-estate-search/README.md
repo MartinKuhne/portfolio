@@ -132,6 +132,16 @@ You can run the API and UI independently or concurrently:
   ```
   The Vite dev server opens at: `http://localhost:5173/` and proxies `/graphql` to `http://localhost:4000`.
 
+- **Import sample listings (`sample_listings.json`):**
+  ```bash
+  npm run db:import
+  ```
+  Or from the API package directly:
+  ```bash
+  npm run db:import -w @real-estate/api
+  ```
+  This imports the provided 12-listing dataset (`sample_listings.json`), maps multi-part address fields, and inserts records idempotently (`ON CONFLICT DO NOTHING`). Inside Docker, `sample_listings.json` is packaged at `/app/sample_listings.json` and can be imported via `docker compose exec api npm run db:import`.
+
 ---
 
 ## Running Tests & Coverage
@@ -259,4 +269,4 @@ query SearchListings($input: SearchListingsInput) {
 | `keyword` | `String` | Case-insensitive description substring filter. |
 | `targetBudget`| `JSONScalar` | Desired budget for relevance ranking computation (must be $> 0$). |
 | `page` | `JSONScalar` | 1-indexed page number (defaults to `1`). |
-| `pageSize` | `JSONScalar` | Items per page (defaults to `10`, maximum `50`). |
+| `pageSize` | `JSONScalar` | Items per page (defaults to `10`, maximum `100`). |

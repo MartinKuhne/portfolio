@@ -16,7 +16,6 @@ export interface SearchFormProps {
   onChange: (field: keyof SearchFormState, value: string) => void;
   onSubmit: (e?: React.FormEvent) => void;
   onReset: () => void;
-  loading?: boolean;
 }
 
 export function SearchForm({

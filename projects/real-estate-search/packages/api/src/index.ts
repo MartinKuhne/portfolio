@@ -10,6 +10,7 @@ export { executeSearch } from './search/executeSearch.js';
 export * from './db/client.js';
 export * from './db/schema.js';
 export * from './db/seed.js';
+export * from './db/importSample.js';
 
 export interface StartServerOptions {
   port?: number;
