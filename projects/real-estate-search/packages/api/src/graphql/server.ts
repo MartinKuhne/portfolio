@@ -111,7 +111,11 @@ export function createGraphqlApp(
             if (!result.ok) {
               ctx.httpStatus = result.error.code === 'INTERNAL_ERROR' ? 500 : 400;
             }
-            return result;
+            return {
+              ...result,
+              listings: result.listings ?? [],
+              pagination: result.pagination ?? null,
+            };
           } catch (err) {
             ctx.httpStatus = 500;
             return {

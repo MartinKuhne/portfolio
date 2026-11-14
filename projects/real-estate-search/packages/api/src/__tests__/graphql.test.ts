@@ -167,6 +167,61 @@ describe('GraphQL searchListings endpoint', () => {
     expect(body.data.searchListings.error.totalPages).toBeGreaterThan(0);
   });
 
+  it('returns valid payload with empty listings and null pagination when full selection set is requested on error (VALIDATION_ERROR and OUT_OF_RANGE)', async () => {
+    const fullQuery = `query Search($input: SearchListingsInput!) {
+      searchListings(input: $input) {
+        ok
+        listings { id address price bedrooms relevanceScore }
+        pagination { page pageSize totalResults totalPages }
+        error { code message field totalPages }
+      }
+    }`;
+
+    // 1. VALIDATION_ERROR with full selection set
+    const valRes = await yoga.fetch('http://localhost:4000/graphql', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        query: fullQuery,
+        variables: { input: { minPrice: 'bad-input' } },
+      }),
+    });
+    expect(valRes.status).toBe(400);
+    const valBody = await valRes.json();
+    expect(valBody.errors).toBeUndefined();
+    expect(valBody.data.searchListings.ok).toBe(false);
+    expect(valBody.data.searchListings.listings).toEqual([]);
+    expect(valBody.data.searchListings.pagination).toBeNull();
+    expect(valBody.data.searchListings.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: expect.stringContaining('minPrice'),
+      field: 'minPrice',
+      totalPages: null,
+    });
+
+    // 2. OUT_OF_RANGE with full selection set
+    const rangeRes = await yoga.fetch('http://localhost:4000/graphql', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        query: fullQuery,
+        variables: { input: { city: 'Austin', page: 999, pageSize: 5 } },
+      }),
+    });
+    expect(rangeRes.status).toBe(400);
+    const rangeBody = await rangeRes.json();
+    expect(rangeBody.errors).toBeUndefined();
+    expect(rangeBody.data.searchListings.ok).toBe(false);
+    expect(rangeBody.data.searchListings.listings).toEqual([]);
+    expect(rangeBody.data.searchListings.pagination).toBeNull();
+    expect(rangeBody.data.searchListings.error).toEqual({
+      code: 'OUT_OF_RANGE',
+      message: expect.stringContaining('Page 999 exceeds total pages'),
+      field: 'page',
+      totalPages: expect.any(Number),
+    });
+  });
+
   it('returns explicit 500 status and structured error object when database fails (REQ-ERR-004..006)', async () => {
     const brokenDb = {
       select: () => {
