@@ -79,8 +79,8 @@ This document records the architectural decisions and implementation rulings mad
   1. Use native `fetch` + `AbortController` + an incrementing `requestIdRef` in [App.tsx](./packages/ui/src/App.tsx) and [searchClient.ts](./packages/ui/src/api/searchClient.ts) rather than Apollo Client; superseded responses/rejections are ignored and do not clear `loading`.
   2. Keep the `Search` submit button enabled while loading so users can trigger a new search mid-flight and supersede stale requests.
   3. Run `validateSearchInput` in both `App.tsx` (so unit tests injecting a mock `searchFn` still exercise `REQ-VAL-001`) and `searchClient.ts`.
-  4. Track committed `activeInputRef` separately from live `formValues` so clicking `Next Page` / `Previous Page` paginates the active search even if unsubmitted inputs were edited (`REQ-PAG-008`).
-  5. Render `Page Size` as an MUI `TextField` rather than `Select` for direct numeric input and Playwright `.fill()` compatibility, and run an initial default search on mount.
+  4. Track committed `activeFormRef` separately from live `formState` so clicking `Next Page` / `Previous Page` paginates the active search even if unsubmitted inputs were edited (`REQ-PAG-008`).
+  5. Render `Page Size` as an MUI dropdown (`TextField select` with options `5`, `10`, `20`, `50`, `100`, defaulting to `10`), and only display search results after the user presses `Search` (or `Reset Filters`) rather than auto-querying on initial page load.
 - **Consequences:**
   - Smaller UI bundle, deterministic race-condition handling, and full alignment between unit tests and Playwright E2E selectors.
 

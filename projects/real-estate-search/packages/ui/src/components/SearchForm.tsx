@@ -1,5 +1,7 @@
 import React from 'react';
-import { Box, Button, Grid, TextField } from '@mui/material';
+import { Box, Button, Grid, MenuItem, TextField } from '@mui/material';
+
+const PAGE_SIZE_OPTIONS = ['5', '10', '20', '50', '100'] as const;
 
 export interface SearchFormState {
   minPrice: string;
@@ -100,13 +102,19 @@ export function SearchForm({
         </Grid>
         <Grid item xs={12} sm={6} md={4}>
           <TextField
+            select
             fullWidth
             id="page-size"
             label="Page Size"
             value={values.pageSize}
             onChange={handleChange('pageSize')}
-            inputProps={{ 'aria-label': 'Page Size' }}
-          />
+          >
+            {PAGE_SIZE_OPTIONS.map((size) => (
+              <MenuItem key={size} value={size}>
+                {size}
+              </MenuItem>
+            ))}
+          </TextField>
         </Grid>
         <Grid item xs={12} sx={{ display: 'flex', gap: 2, mt: 1 }}>
           <Button

@@ -1,8 +1,13 @@
 import { expect, test } from '@playwright/test';
 
 test.describe('Real Estate Search E2E Journeys', () => {
-  test('initial load displays ranked listings, currency prices, and pagination metadata', async ({ page }) => {
+  test('initial load shows no results until user presses Search, then displays ranked listings and pagination metadata', async ({ page }) => {
     await page.goto('/');
+    await expect(page.getByText(/Page 1 of/i)).not.toBeVisible();
+    await expect(page.getByText(/no listings matched/i)).not.toBeVisible();
+
+    await page.getByRole('button', { name: /search/i }).click();
+
     await expect(page.getByText(/Page 1 of/i)).toBeVisible();
     await expect(page.getByRole('button', { name: /previous page/i })).toBeDisabled();
     await expect(page.getByText(/\$\d{1,3}(,\d{3})*/).first()).toBeVisible();
@@ -19,9 +24,10 @@ test.describe('Real Estate Search E2E Journeys', () => {
     await expect(page.getByText(/Austin/i).first()).toBeVisible();
   });
 
-  test('pagination navigation preserves filters and resets to page 1 on filter modification', async ({ page }) => {
+  test('pagination navigation preserves filters via Page Size dropdown and resets to page 1 on filter modification', async ({ page }) => {
     await page.goto('/');
-    await page.getByLabel(/page size/i).fill('5');
+    await page.getByLabel(/page size/i).click();
+    await page.getByRole('option', { name: '5', exact: true }).click();
     await page.getByRole('button', { name: /search/i }).click();
     await expect(page.getByText(/Page 1 of/i)).toBeVisible();
 
@@ -56,6 +62,7 @@ test.describe('Real Estate Search E2E Journeys', () => {
 
   test('network or API failure displays alert, clears listings, and recovers upon retry', async ({ page }) => {
     await page.goto('/');
+    await page.getByRole('button', { name: /search/i }).click();
     await expect(page.getByText(/Page 1 of/i)).toBeVisible();
 
     // Intercept GraphQL requests to simulate network failure

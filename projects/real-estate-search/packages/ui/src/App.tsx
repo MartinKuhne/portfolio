@@ -25,7 +25,7 @@ const DEFAULT_FORM_STATE: SearchFormState = {
 function toRawSearchInput(form: SearchFormState, page: number): RawSearchInput {
   const raw: RawSearchInput = {
     page,
-    pageSize: form.pageSize === '' ? undefined : form.pageSize,
+    pageSize: form.pageSize,
   };
   if (form.minPrice !== '') raw.minPrice = form.minPrice;
   if (form.maxPrice !== '') raw.maxPrice = form.maxPrice;
@@ -55,6 +55,7 @@ export function App({
 
   const requestIdRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const activeFormRef = useRef<SearchFormState>(DEFAULT_FORM_STATE);
 
   const runSearch = useCallback(
     async (form: SearchFormState, page: number) => {
@@ -116,36 +117,37 @@ export function App({
   );
 
   useEffect(() => {
-    runSearch(DEFAULT_FORM_STATE, 1);
     return () => {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
     };
-  }, [runSearch]);
+  }, []);
 
   const handleFieldChange = (field: keyof SearchFormState, value: string) => {
     setFormState((prev) => ({ ...prev, [field]: value }));
   };
 
   const handleSearch = () => {
+    activeFormRef.current = formState;
     runSearch(formState, 1);
   };
 
   const handleReset = () => {
     setFormState(DEFAULT_FORM_STATE);
+    activeFormRef.current = DEFAULT_FORM_STATE;
     runSearch(DEFAULT_FORM_STATE, 1);
   };
 
   const handlePreviousPage = () => {
     if (pagination && pagination.page > 1) {
-      runSearch(formState, pagination.page - 1);
+      runSearch(activeFormRef.current, pagination.page - 1);
     }
   };
 
   const handleNextPage = () => {
     if (pagination && pagination.page < pagination.totalPages) {
-      runSearch(formState, pagination.page + 1);
+      runSearch(activeFormRef.current, pagination.page + 1);
     }
   };
 
