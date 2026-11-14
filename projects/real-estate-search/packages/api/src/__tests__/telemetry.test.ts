@@ -146,9 +146,11 @@ describe('API OpenTelemetry tracing and logging', () => {
       body: JSON.stringify({
         query: `query Search($input: SearchListingsInput!) {
           searchListings(input: $input) {
-            ok
-            listings { id city }
-            pagination { totalResults }
+            __typename
+            ... on SearchListingsSuccess {
+              listings { id city }
+              pagination { totalResults }
+            }
           }
         }`,
         variables: { input: { city: 'Austin', page: 1, pageSize: 5 } },
@@ -200,7 +202,7 @@ describe('API OpenTelemetry tracing and logging', () => {
     expect(logEntries.map((e) => e.body)).toContain('http.request.completed');
   });
 
-  it('leaves SERVER span UNSET on 400 validation errors with WARN log and sets ERROR on 500 internal errors', async () => {
+  it('leaves SERVER span UNSET on domain validation errors with WARN log and sets ERROR on INTERNAL_SERVER_ERROR', async () => {
     const memoryExporter = new InMemorySpanExporter();
     initApiTelemetry({
       spanProcessors: [new SimpleSpanProcessor(memoryExporter)],
@@ -215,16 +217,19 @@ describe('API OpenTelemetry tracing and logging', () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         query: `query Search($input: SearchListingsInput!) {
-          searchListings(input: $input) { ok error { code message } }
+          searchListings(input: $input) {
+            __typename
+            ... on SearchError { code message field }
+          }
         }`,
         variables: { input: { minPrice: 'invalid' } },
       }),
     });
-    expect(badRes.status).toBe(400);
+    expect(badRes.status).toBe(200);
 
-    const serverSpan400 = memoryExporter.getFinishedSpans().find((s) => s.name === 'POST /graphql');
-    expect(serverSpan400?.attributes['http.response.status_code']).toBe(400);
-    expect(serverSpan400?.status.code).toBe(SpanStatusCode.UNSET);
+    const serverSpanDomain = memoryExporter.getFinishedSpans().find((s) => s.name === 'POST /graphql');
+    expect(serverSpanDomain?.attributes['http.response.status_code']).toBe(200);
+    expect(serverSpanDomain?.status.code).toBe(SpanStatusCode.UNSET);
 
     const warnLogs = consoleSpy.mock.calls.map((call) => JSON.parse(String(call[0])));
     expect(warnLogs.some((l) => l.body === 'http.request.rejected' && l.severityText === 'WARN')).toBe(true);
@@ -240,15 +245,17 @@ describe('API OpenTelemetry tracing and logging', () => {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        query: `query Search { searchListings { ok error { code message } } }`,
+        query: `query Search { searchListings { __typename } }`,
       }),
     });
-    expect(errRes.status).toBe(500);
+    expect(errRes.status).toBe(200);
+    const errBody = await errRes.json();
+    expect(errBody.errors[0].extensions.code).toBe('INTERNAL_SERVER_ERROR');
     expect(consoleErrSpy).toHaveBeenCalled();
 
-    const serverSpan500 = memoryExporter.getFinishedSpans().find((s) => s.name === 'POST /graphql');
-    expect(serverSpan500?.attributes['http.response.status_code']).toBe(500);
-    expect(serverSpan500?.status.code).toBe(SpanStatusCode.ERROR);
+    const serverSpanErr = memoryExporter.getFinishedSpans().find((s) => s.name === 'POST /graphql');
+    expect(serverSpanErr?.attributes['http.response.status_code']).toBe(200);
+    expect(serverSpanErr?.status.code).toBe(SpanStatusCode.ERROR);
   });
 
   it('records exception and sets ERROR status when instrumentation.request wrapped call throws', async () => {

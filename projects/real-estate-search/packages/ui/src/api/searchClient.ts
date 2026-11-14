@@ -1,5 +1,7 @@
 import { context, SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
 import {
+  type Listing,
+  type PaginationMeta,
   type RawSearchInput,
   type SearchResponse,
   validateSearchInput,
@@ -9,32 +11,98 @@ import { getTracer, injectTraceHeaders, logUi } from '../telemetry.js';
 const SEARCH_QUERY = /* GraphQL */ `
   query SearchListings($input: SearchListingsInput) {
     searchListings(input: $input) {
-      ok
-      listings {
-        id
-        address
-        city
-        price
-        bedrooms
-        description
-        listedDate
-        relevanceScore
+      __typename
+      ... on SearchListingsSuccess {
+        listings {
+          id
+          address
+          city
+          price
+          bedrooms
+          description
+          listedDate
+          relevanceScore
+        }
+        pagination {
+          page
+          pageSize
+          totalResults
+          totalPages
+        }
       }
-      pagination {
-        page
-        pageSize
-        totalResults
-        totalPages
-      }
-      error {
+      ... on SearchError {
         code
         message
         field
+      }
+      ... on SearchOutOfRangeError {
         totalPages
       }
     }
   }
 `;
+
+type GraphqlSearchListingsResult =
+  | {
+      __typename: 'SearchListingsSuccess';
+      listings: Listing[];
+      pagination: PaginationMeta;
+    }
+  | {
+      __typename: 'SearchValidationError';
+      code: 'VALIDATION_ERROR';
+      message: string;
+      field: string | null;
+    }
+  | {
+      __typename: 'SearchOutOfRangeError';
+      code: 'OUT_OF_RANGE';
+      message: string;
+      field: string | null;
+      totalPages: number;
+    };
+
+function mapGraphqlResultToSearchResponse(
+  raw: GraphqlSearchListingsResult | null | undefined
+): SearchResponse | null {
+  if (!raw) {
+    return null;
+  }
+  switch (raw.__typename) {
+    case 'SearchListingsSuccess':
+      return {
+        ok: true,
+        listings: raw.listings,
+        pagination: raw.pagination,
+        error: null,
+      };
+    case 'SearchValidationError':
+      return {
+        ok: false,
+        listings: [],
+        pagination: null,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: raw.message,
+          field: raw.field ?? null,
+        },
+      };
+    case 'SearchOutOfRangeError':
+      return {
+        ok: false,
+        listings: [],
+        pagination: null,
+        error: {
+          code: 'OUT_OF_RANGE',
+          message: raw.message,
+          field: raw.field ?? 'page',
+          totalPages: raw.totalPages,
+        },
+      };
+    default:
+      return null;
+  }
+}
 
 export async function fetchSearchListings(
   rawInput: RawSearchInput,
@@ -115,13 +183,13 @@ export async function fetchSearchListings(
     }
 
     let json: {
-      data?: { searchListings?: SearchResponse };
-      errors?: Array<{ message: string }>;
+      data?: { searchListings?: GraphqlSearchListingsResult | null };
+      errors?: Array<{ message?: string; extensions?: { code?: string } }>;
     };
     try {
       json = (await response.json()) as {
-        data?: { searchListings?: SearchResponse };
-        errors?: Array<{ message: string }>;
+        data?: { searchListings?: GraphqlSearchListingsResult | null };
+        errors?: Array<{ message?: string; extensions?: { code?: string } }>;
       };
     } catch (parseErr: unknown) {
       const error = parseErr instanceof Error ? parseErr : new Error(String(parseErr));
@@ -149,11 +217,29 @@ export async function fetchSearchListings(
       };
     }
 
-    if (json.data?.searchListings) {
-      const payload = json.data.searchListings;
+    if (json.errors && json.errors.length > 0) {
+      const message = json.errors[0]?.message || 'GraphQL query failed.';
+      httpSpan.setStatus({ code: SpanStatusCode.ERROR, message });
+      uiSpan.setAttribute('search.ok', false);
+      uiSpan.setStatus({ code: SpanStatusCode.ERROR, message });
+      logUi('ERROR', 'ui.search.graphql_errors', { 'error.message': message }, httpCtx);
+      return {
+        ok: false,
+        listings: [],
+        pagination: null,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message,
+          field: null,
+        },
+      };
+    }
+
+    const payload = mapGraphqlResultToSearchResponse(json.data?.searchListings);
+    if (payload) {
       uiSpan.setAttribute('search.ok', payload.ok);
       if (payload.ok) {
-        const totalResults = payload.pagination?.totalResults ?? 0;
+        const totalResults = payload.pagination.totalResults;
         uiSpan.setAttribute('search.totalResults', totalResults);
         uiSpan.setAttribute('search.returnedCount', payload.listings.length);
         logUi(
@@ -182,24 +268,6 @@ export async function fetchSearchListings(
       return payload;
     }
 
-    if (json.errors && json.errors.length > 0) {
-      const message = json.errors[0]?.message || 'GraphQL query failed.';
-      httpSpan.setStatus({ code: SpanStatusCode.ERROR, message });
-      uiSpan.setAttribute('search.ok', false);
-      uiSpan.setStatus({ code: SpanStatusCode.ERROR, message });
-      logUi('ERROR', 'ui.search.graphql_errors', { 'error.message': message }, httpCtx);
-      return {
-        ok: false,
-        listings: [],
-        pagination: null,
-        error: {
-          code: 'INTERNAL_ERROR',
-          message,
-          field: null,
-        },
-      };
-    }
-
     const emptyMessage = 'No response data returned from search server.';
     httpSpan.setStatus({ code: SpanStatusCode.ERROR, message: emptyMessage });
     uiSpan.setAttribute('search.ok', false);
@@ -217,8 +285,7 @@ export async function fetchSearchListings(
     };
   } catch (err: unknown) {
     if ((err as { name?: string })?.name === 'AbortError') {
-      httpSpan.setAttribute('http.aborted', true);
-      logUi('INFO', 'ui.search.aborted', {}, httpCtx);
+      logUi('INFO', 'ui.search.request_aborted', {}, httpCtx);
       throw err;
     }
 

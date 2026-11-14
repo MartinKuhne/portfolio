@@ -50,7 +50,7 @@ This document defines the functional, user interface, validation, and error-hand
 
 - REQ-ARCH-001: The application shall provide a web user interface (UI) for searching real estate listings.
 - REQ-ARCH-002: WHEN the user submits search criteria, the UI shall send a search request to the search engine.
-- REQ-ARCH-003: WHEN a search request succeeds, the search engine shall return a structured response with the matching listings and pagination metadata.
+- REQ-ARCH-003: WHEN a search request succeeds, the search engine shall return a structured GraphQL result (`SearchListingsSuccess`) with the matching listings and pagination metadata.
 - REQ-ARCH-004: WHEN the search engine receives identical inputs for an unchanged dataset, the search engine shall return identical outputs.
 
 ---
@@ -117,7 +117,9 @@ This document defines the functional, user interface, validation, and error-hand
 
 ---
 
-## 6. Input Validation & Deliberate Error Handling
+## 6. Input Validation & GraphQL Error Handling
+
+Expected domain errors (input validation and out-of-range pagination) follow the GraphQL **Errors as Data** pattern via a GraphQL union (`SearchListingsResult = SearchListingsSuccess | SearchValidationError | SearchOutOfRangeError`) returned with HTTP `200 OK` per the GraphQL-over-HTTP specification. Numeric/integer search input fields use an uncoerced pass-through scalar (`JSONScalar`) so malformed values reach domain validation cleanly (`REQ-VAL-003`). Unexpected database or server failures surface via standard GraphQL top-level `errors` (`extensions.code = "INTERNAL_SERVER_ERROR"`) with masked messages and a nullable `searchListings` field, while HTTP `400 Bad Request` is reserved for malformed HTTP/JSON payloads or GraphQL syntax/validation failures before execution.
 
 - REQ-VAL-001: WHEN the user submits a search, the UI shall validate all search inputs before sending the request.
 - REQ-VAL-002: WHEN the search engine receives a search request, the search engine shall validate all search inputs before executing the search.
@@ -130,10 +132,10 @@ This document defines the functional, user interface, validation, and error-hand
 - REQ-VAL-009: IF `pageSize` is non-numeric, non-integer, or less than or equal to `0`, THEN the search engine shall return a validation error for `pageSize`.
 - REQ-VAL-010: WHERE a maximum `pageSize` is configured, IF `pageSize` exceeds the maximum, THEN the search engine shall return a validation error for `pageSize`.
 - REQ-VAL-011: IF `page` is non-numeric, non-integer, or less than `1`, THEN the search engine shall return a validation error for `page`.
-- REQ-VAL-012: IF `totalResults` is greater than `0` and `page` exceeds `totalPages`, THEN the search engine shall return an out-of-range error that includes `totalPages`.
+- REQ-VAL-012: IF `totalResults` is greater than `0` and `page` exceeds `totalPages`, THEN the search engine shall return an out-of-range error (`SearchOutOfRangeError`) that includes `totalPages`.
 - REQ-ERR-001: IF a validation error or request failure occurs, THEN the UI shall display an error message describing the failure.
 - REQ-ERR-002: IF a validation error or request failure occurs, THEN the UI shall clear any previously displayed listing results.
 - REQ-ERR-003: IF a validation error or request failure occurs, THEN the UI shall allow the user to edit search inputs and retry without reloading the page.
-- REQ-ERR-004: IF the search engine receives invalid input, THEN the search engine shall return an error status.
-- REQ-ERR-005: IF the search engine receives invalid input, THEN the search engine shall return a structured error object with an error code, a message, and the invalid field name.
-- REQ-ERR-006: IF the search engine receives invalid input, THEN the search engine shall handle the error without throwing an unhandled exception.
+- REQ-ERR-004: IF the search engine executes a query that fails input validation or pagination bounds, THEN the GraphQL endpoint shall return an error union variant (`SearchValidationError` or `SearchOutOfRangeError`) with a `SearchErrorCode` over HTTP `200 OK`; IF an unexpected server or database error occurs during execution, THEN the GraphQL endpoint shall return a GraphQL top-level `errors` entry with `extensions.code` set to `"INTERNAL_SERVER_ERROR"` and set `data.searchListings` to `null`.
+- REQ-ERR-005: IF the search engine receives invalid input, THEN the GraphQL error union variant (`SearchValidationError` / `SearchOutOfRangeError` implementing `SearchError`) shall include a structured `code`, `message`, and `field`.
+- REQ-ERR-006: IF the search engine receives invalid input, THEN the search engine shall handle the error without throwing an unhandled exception, and unexpected internal resolver failures shall return sanitized GraphQL `errors` without leaking internal stack traces or database details.

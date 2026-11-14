@@ -45,28 +45,32 @@ describe('fetchSearchListings (searchClient)', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('sends GraphQL query and returns listings on success', async () => {
-    const mockData = {
-      ok: true,
-      listings: [
-        {
-          id: 'LST-001',
-          address: '101 Congress Ave, Austin, TX',
-          city: 'Austin',
-          price: 485000,
-          bedrooms: 3,
-          description: 'Modern downtown condo',
-          listedDate: '2026-10-20T00:00:00.000Z',
-          relevanceScore: 0.94,
-        },
-      ],
-      pagination: { page: 1, pageSize: 10, totalResults: 1, totalPages: 1 },
-      error: null,
-    };
+  it('sends GraphQL query and returns listings on SearchListingsSuccess', async () => {
+    const listings = [
+      {
+        id: 'LST-001',
+        address: '101 Congress Ave, Austin, TX',
+        city: 'Austin',
+        price: 485000,
+        bedrooms: 3,
+        description: 'Modern downtown condo',
+        listedDate: '2026-10-20T00:00:00.000Z',
+        relevanceScore: 0.94,
+      },
+    ];
+    const pagination = { page: 1, pageSize: 10, totalResults: 1, totalPages: 1 };
 
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ data: { searchListings: mockData } }),
+      json: async () => ({
+        data: {
+          searchListings: {
+            __typename: 'SearchListingsSuccess',
+            listings,
+            pagination,
+          },
+        },
+      }),
     });
     globalThis.fetch = mockFetch as unknown as typeof fetch;
 
@@ -83,7 +87,12 @@ describe('fetchSearchListings (searchClient)', () => {
         }),
       })
     );
-    expect(res).toEqual(mockData);
+    expect(res).toEqual({
+      ok: true,
+      listings,
+      pagination,
+      error: null,
+    });
 
     const spans = memoryExporter.getFinishedSpans();
     const httpSpan = spans.find((s) => s.name === 'HTTP POST /graphql');
@@ -100,8 +109,39 @@ describe('fetchSearchListings (searchClient)', () => {
     );
   });
 
-  it('handles HTTP 400 error payload returned by server (REQ-ERR-001)', async () => {
-    const errorPayload = {
+  it('handles SearchOutOfRangeError and SearchValidationError union responses over HTTP 200 (REQ-ERR-001)', async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: {
+          searchListings: {
+            __typename: 'SearchOutOfRangeError',
+            code: 'OUT_OF_RANGE',
+            message: 'Requested page 5 exceeds total pages 2.',
+            field: 'page',
+            totalPages: 2,
+          },
+        },
+      }),
+    }).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: {
+          searchListings: {
+            __typename: 'SearchValidationError',
+            code: 'VALIDATION_ERROR',
+            message: 'minPrice must not be negative.',
+            field: null,
+          },
+        },
+      }),
+    });
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
+
+    const outOfRangeRes = await fetchSearchListings({ page: 5, pageSize: 10 });
+    expect(outOfRangeRes).toEqual({
       ok: false,
       listings: [],
       pagination: null,
@@ -111,25 +151,59 @@ describe('fetchSearchListings (searchClient)', () => {
         field: 'page',
         totalPages: 2,
       },
-    };
+    });
 
-    const mockFetch = vi.fn().mockResolvedValue({
+    const validationRes = await fetchSearchListings({ page: 1, pageSize: 10 });
+    expect(validationRes).toEqual({
       ok: false,
-      status: 400,
-      json: async () => ({ data: { searchListings: errorPayload } }),
+      listings: [],
+      pagination: null,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'minPrice must not be negative.',
+        field: null,
+      },
+    });
+  });
+
+  it('prioritizes top-level GraphQL errors even when data is also present', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: { searchListings: null },
+        errors: [
+          {
+            message: 'An unexpected database error occurred.',
+            extensions: { code: 'INTERNAL_SERVER_ERROR' },
+          },
+        ],
+      }),
     });
     globalThis.fetch = mockFetch as unknown as typeof fetch;
 
-    const res = await fetchSearchListings({ page: 5, pageSize: 10 });
+    const res = await fetchSearchListings({ page: 1, pageSize: 10 });
 
-    expect(res).toEqual(errorPayload);
+    expect(res).toEqual({
+      ok: false,
+      listings: [],
+      pagination: null,
+      error: {
+        code: 'INTERNAL_ERROR',
+        message: 'An unexpected database error occurred.',
+        field: null,
+      },
+    });
   });
 
   it('handles GraphQL errors array in response', async () => {
     const mockFetch = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 500,
-      json: async () => ({ errors: [{ message: 'Internal server error occurred.' }] }),
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: { searchListings: null },
+        errors: [{ message: 'Internal server error occurred.' }],
+      }),
     });
     globalThis.fetch = mockFetch as unknown as typeof fetch;
 

@@ -1,7 +1,7 @@
 import { SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
 import { GraphQLScalarType, Kind, type ValueNode } from 'graphql';
-import { createSchema, createYoga, type YogaServerInstance } from 'graphql-yoga';
-import type { RawSearchInput } from '@real-estate/shared';
+import { createGraphQLError, createSchema, createYoga, type YogaServerInstance } from 'graphql-yoga';
+import type { RawSearchInput, SearchResponse } from '@real-estate/shared';
 import type { AppDatabase } from '../db/client.js';
 import * as searchService from '../search/executeSearch.js';
 import {
@@ -86,27 +86,81 @@ export const typeDefs = /* GraphQL */ `
     totalPages: Int!
   }
 
-  type SearchError {
-    code: String!
+  enum SearchErrorCode {
+    VALIDATION_ERROR
+    OUT_OF_RANGE
+  }
+
+  interface SearchError {
+    code: SearchErrorCode!
     message: String!
     field: String
-    totalPages: Int
   }
 
-  type SearchListingsPayload {
-    ok: Boolean!
-    listings: [Listing!]!
-    pagination: PaginationMeta
-    error: SearchError
+  type SearchValidationError implements SearchError {
+    code: SearchErrorCode!
+    message: String!
+    field: String
   }
+
+  type SearchOutOfRangeError implements SearchError {
+    code: SearchErrorCode!
+    message: String!
+    field: String
+    totalPages: Int!
+  }
+
+  type SearchListingsSuccess {
+    listings: [Listing!]!
+    pagination: PaginationMeta!
+  }
+
+  union SearchListingsResult =
+    | SearchListingsSuccess
+    | SearchValidationError
+    | SearchOutOfRangeError
 
   type Query {
-    searchListings(input: SearchListingsInput): SearchListingsPayload!
+    searchListings(input: SearchListingsInput): SearchListingsResult
   }
 `;
 
 export interface YogaServerContext extends Record<string, unknown> {
-  httpStatus?: number;
+  hasDomainError?: boolean;
+  hasInternalError?: boolean;
+}
+
+function toGraphqlSearchResult(result: SearchResponse) {
+  if (result.ok) {
+    return {
+      __typename: 'SearchListingsSuccess' as const,
+      listings: result.listings,
+      pagination: result.pagination,
+    };
+  }
+
+  if (result.error.code === 'INTERNAL_ERROR') {
+    throw createGraphQLError(result.error.message, {
+      extensions: { code: 'INTERNAL_SERVER_ERROR' },
+    });
+  }
+
+  if (result.error.code === 'OUT_OF_RANGE') {
+    return {
+      __typename: 'SearchOutOfRangeError' as const,
+      code: 'OUT_OF_RANGE' as const,
+      message: result.error.message,
+      field: result.error.field ?? 'page',
+      totalPages: result.error.totalPages ?? 0,
+    };
+  }
+
+  return {
+    __typename: 'SearchValidationError' as const,
+    code: 'VALIDATION_ERROR' as const,
+    message: result.error.message,
+    field: result.error.field ?? null,
+  };
 }
 
 export function createGraphqlApp(
@@ -129,21 +183,9 @@ export function createGraphqlApp(
               'graphql.operation.name': 'searchListings',
             },
             async (span) => {
+              let result: SearchResponse;
               try {
-                const input = args?.input ?? {};
-                const result = await searchService.executeSearch(db, input);
-                if (!result.ok) {
-                  ctx.httpStatus = result.error.code === 'INTERNAL_ERROR' ? 500 : 400;
-                  span.setStatus({
-                    code: SpanStatusCode.ERROR,
-                    message: result.error.message,
-                  });
-                }
-                return {
-                  ...result,
-                  listings: result.listings ?? [],
-                  pagination: result.pagination ?? null,
-                };
+                result = await searchService.executeSearch(db, args?.input ?? {});
               } catch (err) {
                 console.error('GraphQL resolver internal error:', err);
                 const error = err instanceof Error ? err : new Error(String(err));
@@ -156,18 +198,25 @@ export function createGraphqlApp(
                   'graphql.operation.name': 'searchListings',
                   'error.message': error.message,
                 });
-                ctx.httpStatus = 500;
-                return {
-                  ok: false,
-                  listings: [],
-                  pagination: null,
-                  error: {
-                    code: 'INTERNAL_ERROR',
-                    message: 'An unexpected internal error occurred.',
-                    field: null,
-                  },
-                };
+                ctx.hasInternalError = true;
+                throw createGraphQLError('An unexpected internal error occurred.', {
+                  extensions: { code: 'INTERNAL_SERVER_ERROR' },
+                });
               }
+
+              if (!result.ok) {
+                if (result.error.code === 'INTERNAL_ERROR') {
+                  ctx.hasInternalError = true;
+                } else {
+                  ctx.hasDomainError = true;
+                }
+                span.setAttribute('error.code', result.error.code);
+                span.setStatus({
+                  code: SpanStatusCode.ERROR,
+                  message: result.error.message,
+                });
+              }
+              return toGraphqlSearchResult(result);
             }
           );
         },
@@ -217,36 +266,25 @@ export function createGraphqlApp(
             );
           },
         },
-        onResponse({ request, response, setResponse, serverContext, fetchAPI }) {
+        onResponse({ request, response, serverContext }) {
           const ctx = serverContext as (YogaServerContext & Record<string, unknown>) | undefined;
-          let finalStatus = response.status;
-          if (ctx && typeof ctx.httpStatus === 'number') {
-            finalStatus = ctx.httpStatus;
-            setResponse(
-              new fetchAPI.Response(response.body, {
-                status: finalStatus,
-                statusText: finalStatus === 400 ? 'Bad Request' : 'Internal Server Error',
-                headers: response.headers,
-              })
-            );
-          }
-
+          const finalStatus = response.status;
           const method = request.method.toUpperCase();
           const pathname = new URL(request.url, 'http://localhost').pathname;
           const activeSpan = trace.getActiveSpan();
           activeSpan?.setAttribute('http.response.status_code', finalStatus);
 
-          if (finalStatus >= 500) {
+          if (finalStatus >= 500 || ctx?.hasInternalError) {
             activeSpan?.setStatus({
               code: SpanStatusCode.ERROR,
-              message: `HTTP ${finalStatus}`,
+              message: ctx?.hasInternalError ? 'GraphQL INTERNAL_SERVER_ERROR' : `HTTP ${finalStatus}`,
             });
             logApi(SeverityNumber.ERROR, 'ERROR', 'http.request.failed', {
               'http.request.method': method,
               'url.path': pathname,
               'http.response.status_code': finalStatus,
             });
-          } else if (finalStatus >= 400) {
+          } else if (finalStatus >= 400 || ctx?.hasDomainError) {
             logApi(SeverityNumber.WARN, 'WARN', 'http.request.rejected', {
               'http.request.method': method,
               'url.path': pathname,

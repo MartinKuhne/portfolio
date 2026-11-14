@@ -264,36 +264,41 @@ Both `@real-estate/ui` and `@real-estate/api` are instrumented with OpenTelemetr
 ```graphql
 query SearchListings($input: SearchListingsInput) {
   searchListings(input: $input) {
-    ok
-    listings {
-      internalId
-      id
-      source
-      address
-      city
-      state
-      zip
-      price
-      bedrooms
-      bathrooms
-      sqft
-      latitude
-      longitude
-      status
-      description
-      listedDate
-      relevanceScore
+    __typename
+    ... on SearchListingsSuccess {
+      listings {
+        internalId
+        id
+        source
+        address
+        city
+        state
+        zip
+        price
+        bedrooms
+        bathrooms
+        sqft
+        latitude
+        longitude
+        status
+        description
+        listedDate
+        relevanceScore
+      }
+      pagination {
+        page
+        pageSize
+        totalResults
+        totalPages
+      }
     }
-    pagination {
-      page
-      pageSize
-      totalResults
-      totalPages
-    }
-    error {
+    ... on SearchError {
       code
       message
       field
+    }
+    ... on SearchOutOfRangeError {
+      totalPages
     }
   }
 }
@@ -311,3 +316,9 @@ query SearchListings($input: SearchListingsInput) {
 | `targetBudget`| `JSONScalar` | Desired budget for relevance ranking computation (must be $> 0$). |
 | `page` | `JSONScalar` | 1-indexed page number (defaults to `1`). |
 | `pageSize` | `JSONScalar` | Items per page (defaults to `10`, maximum `100`). |
+
+#### Error Response Conventions
+- **Domain Errors (`SearchValidationError`, `SearchOutOfRangeError`):** Returned as typed GraphQL union variants over **HTTP `200 OK`** implementing `interface SearchError` (`code: SearchErrorCode!`, `message: String!`, `field: String`, plus `totalPages: Int!` on `SearchOutOfRangeError`).
+- **Unexpected Internal Errors (`INTERNAL_SERVER_ERROR`):** Surfaced via standard GraphQL top-level `errors` (`extensions.code = "INTERNAL_SERVER_ERROR"`) with masked/sanitized messages and `data.searchListings = null` over **HTTP `200 OK`**.
+- **Malformed Requests:** Invalid JSON or GraphQL syntax/validation errors prior to execution return **HTTP `400 Bad Request`** with top-level `errors`.
+

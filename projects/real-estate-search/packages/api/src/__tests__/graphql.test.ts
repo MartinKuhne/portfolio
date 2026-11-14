@@ -29,28 +29,31 @@ describe('GraphQL searchListings endpoint', () => {
       body: JSON.stringify({
         query: `query Search($input: SearchListingsInput!) {
           searchListings(input: $input) {
-            ok
-            listings {
-              internalId
-              id
-              source
-              address
-              city
-              state
-              zip
-              price
-              bedrooms
-              bathrooms
-              sqft
-              latitude
-              longitude
-              status
-              description
-              listedDate
-              relevanceScore
+            __typename
+            ... on SearchListingsSuccess {
+              listings {
+                internalId
+                id
+                source
+                address
+                city
+                state
+                zip
+                price
+                bedrooms
+                bathrooms
+                sqft
+                latitude
+                longitude
+                status
+                description
+                listedDate
+                relevanceScore
+              }
+              pagination { page pageSize totalResults totalPages }
             }
-            pagination { page pageSize totalResults totalPages }
-            error { code message field totalPages }
+            ... on SearchError { code message field }
+            ... on SearchOutOfRangeError { totalPages }
           }
         }`,
         variables: { input: { city: 'Austin', targetBudget: 500000, page: 1, pageSize: 5 } },
@@ -58,7 +61,8 @@ describe('GraphQL searchListings endpoint', () => {
     });
     const body = await response.json();
     expect(response.status).toBe(200);
-    expect(body.data.searchListings.ok).toBe(true);
+    expect(body.errors).toBeUndefined();
+    expect(body.data.searchListings.__typename).toBe('SearchListingsSuccess');
     expect(body.data.searchListings.listings.length).toBeGreaterThan(0);
     const first = body.data.searchListings.listings[0];
     expect(first.internalId).toMatch(/^[0-9a-f-]{36}$/i);
@@ -72,7 +76,6 @@ describe('GraphQL searchListings endpoint', () => {
     expect(first.status).toBe('active');
     expect(body.data.searchListings.pagination.page).toBe(1);
     expect(body.data.searchListings.pagination.pageSize).toBe(5);
-    expect(body.data.searchListings.error).toBeNull();
   });
 
   it('handles query with inline input literals', async () => {
@@ -90,17 +93,19 @@ describe('GraphQL searchListings endpoint', () => {
             page: 1
             pageSize: 5
           }) {
-            ok
-            listings { id city }
-            pagination { page pageSize totalResults totalPages }
-            error { code message field }
+            __typename
+            ... on SearchListingsSuccess {
+              listings { id city }
+              pagination { page pageSize totalResults totalPages }
+            }
+            ... on SearchError { code message field }
           }
         }`,
       }),
     });
     const body = await response.json();
     expect(response.status).toBe(200);
-    expect(body.data.searchListings.ok).toBe(true);
+    expect(body.data.searchListings.__typename).toBe('SearchListingsSuccess');
     expect(body.data.searchListings.listings.length).toBeGreaterThan(0);
   });
 
@@ -111,16 +116,18 @@ describe('GraphQL searchListings endpoint', () => {
       body: JSON.stringify({
         query: `query Search {
           searchListings {
-            ok
-            listings { id city }
-            pagination { page pageSize totalResults totalPages }
+            __typename
+            ... on SearchListingsSuccess {
+              listings { id city }
+              pagination { page pageSize totalResults totalPages }
+            }
           }
         }`,
       }),
     });
     const body = await response.json();
     expect(response.status).toBe(200);
-    expect(body.data.searchListings.ok).toBe(true);
+    expect(body.data.searchListings.__typename).toBe('SearchListingsSuccess');
     expect(body.data.searchListings.pagination.page).toBe(1);
   });
 
@@ -131,10 +138,12 @@ describe('GraphQL searchListings endpoint', () => {
       body: JSON.stringify({
         query: `query Search($input: SearchListingsInput!) {
           searchListings(input: $input) {
-            ok
-            listings { id }
-            pagination { totalResults totalPages }
-            error { code message }
+            __typename
+            ... on SearchListingsSuccess {
+              listings { id }
+              pagination { totalResults totalPages }
+            }
+            ... on SearchError { code message }
           }
         }`,
         variables: { input: { city: 'NonExistentCity' } },
@@ -142,67 +151,70 @@ describe('GraphQL searchListings endpoint', () => {
     });
     const body = await response.json();
     expect(response.status).toBe(200);
-    expect(body.data.searchListings.ok).toBe(true);
+    expect(body.data.searchListings.__typename).toBe('SearchListingsSuccess');
     expect(body.data.searchListings.listings).toEqual([]);
     expect(body.data.searchListings.pagination.totalResults).toBe(0);
   });
 
-  it('returns explicit 400 status and structured error object without crashing on invalid inputs (REQ-ERR-004..006)', async () => {
+  it('returns HTTP 200 and SearchValidationError union variant without crashing on invalid inputs (REQ-ERR-004..006)', async () => {
     const response = await yoga.fetch('http://localhost:4000/graphql', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         query: `query Search($input: SearchListingsInput!) {
           searchListings(input: $input) {
-            ok
-            error { code message field totalPages }
+            __typename
+            ... on SearchError { code message field }
           }
         }`,
         variables: { input: { minPrice: 'not-a-number' } },
       }),
     });
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(200);
     const body = await response.json();
+    expect(body.errors).toBeUndefined();
     expect(body.data.searchListings).toEqual({
-      ok: false,
-      error: {
-        code: 'VALIDATION_ERROR',
-        message: expect.stringContaining('minPrice'),
-        field: 'minPrice',
-        totalPages: null,
-      },
+      __typename: 'SearchValidationError',
+      code: 'VALIDATION_ERROR',
+      message: expect.stringContaining('minPrice'),
+      field: 'minPrice',
     });
   });
 
-  it('returns explicit 400 status and structured error object for OUT_OF_RANGE error (REQ-VAL-012, REQ-ERR-004)', async () => {
+  it('returns HTTP 200 and SearchOutOfRangeError union variant for OUT_OF_RANGE error (REQ-VAL-012, REQ-ERR-004)', async () => {
     const response = await yoga.fetch('http://localhost:4000/graphql', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         query: `query Search($input: SearchListingsInput!) {
           searchListings(input: $input) {
-            ok
-            error { code message field totalPages }
+            __typename
+            ... on SearchError { code message field }
+            ... on SearchOutOfRangeError { totalPages }
           }
         }`,
         variables: { input: { city: 'Austin', page: 999, pageSize: 5 } },
       }),
     });
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body.data.searchListings.ok).toBe(false);
-    expect(body.data.searchListings.error.code).toBe('OUT_OF_RANGE');
-    expect(body.data.searchListings.error.field).toBe('page');
-    expect(body.data.searchListings.error.totalPages).toBeGreaterThan(0);
+    expect(body.errors).toBeUndefined();
+    expect(body.data.searchListings.__typename).toBe('SearchOutOfRangeError');
+    expect(body.data.searchListings.code).toBe('OUT_OF_RANGE');
+    expect(body.data.searchListings.field).toBe('page');
+    expect(body.data.searchListings.totalPages).toBeGreaterThan(0);
   });
 
-  it('returns valid payload with empty listings and null pagination when full selection set is requested on error (VALIDATION_ERROR and OUT_OF_RANGE)', async () => {
+  it('returns valid GraphQL union results when full fragment selection set is requested on error (VALIDATION_ERROR and OUT_OF_RANGE)', async () => {
     const fullQuery = `query Search($input: SearchListingsInput!) {
       searchListings(input: $input) {
-        ok
-        listings { id address price bedrooms relevanceScore }
-        pagination { page pageSize totalResults totalPages }
-        error { code message field totalPages }
+        __typename
+        ... on SearchListingsSuccess {
+          listings { id address price bedrooms relevanceScore }
+          pagination { page pageSize totalResults totalPages }
+        }
+        ... on SearchError { code message field }
+        ... on SearchOutOfRangeError { totalPages }
       }
     }`;
 
@@ -215,17 +227,14 @@ describe('GraphQL searchListings endpoint', () => {
         variables: { input: { minPrice: 'bad-input' } },
       }),
     });
-    expect(valRes.status).toBe(400);
+    expect(valRes.status).toBe(200);
     const valBody = await valRes.json();
     expect(valBody.errors).toBeUndefined();
-    expect(valBody.data.searchListings.ok).toBe(false);
-    expect(valBody.data.searchListings.listings).toEqual([]);
-    expect(valBody.data.searchListings.pagination).toBeNull();
-    expect(valBody.data.searchListings.error).toEqual({
+    expect(valBody.data.searchListings).toEqual({
+      __typename: 'SearchValidationError',
       code: 'VALIDATION_ERROR',
       message: expect.stringContaining('minPrice'),
       field: 'minPrice',
-      totalPages: null,
     });
 
     // 2. OUT_OF_RANGE with full selection set
@@ -237,13 +246,11 @@ describe('GraphQL searchListings endpoint', () => {
         variables: { input: { city: 'Austin', page: 999, pageSize: 5 } },
       }),
     });
-    expect(rangeRes.status).toBe(400);
+    expect(rangeRes.status).toBe(200);
     const rangeBody = await rangeRes.json();
     expect(rangeBody.errors).toBeUndefined();
-    expect(rangeBody.data.searchListings.ok).toBe(false);
-    expect(rangeBody.data.searchListings.listings).toEqual([]);
-    expect(rangeBody.data.searchListings.pagination).toBeNull();
-    expect(rangeBody.data.searchListings.error).toEqual({
+    expect(rangeBody.data.searchListings).toEqual({
+      __typename: 'SearchOutOfRangeError',
       code: 'OUT_OF_RANGE',
       message: expect.stringContaining('Page 999 exceeds total pages'),
       field: 'page',
@@ -251,7 +258,7 @@ describe('GraphQL searchListings endpoint', () => {
     });
   });
 
-  it('returns explicit 500 status and sanitized structured error object when database fails (REQ-ERR-004..006)', async () => {
+  it('returns HTTP 200 with top-level GraphQL error and null searchListings when database fails (REQ-ERR-004..006)', async () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const brokenDb = {
       select: () => {
@@ -269,27 +276,27 @@ describe('GraphQL searchListings endpoint', () => {
       body: JSON.stringify({
         query: `query Search($input: SearchListingsInput!) {
           searchListings(input: $input) {
-            ok
-            error { code message field totalPages }
+            __typename
+            ... on SearchError { code message field }
           }
         }`,
         variables: { input: { city: 'Austin' } },
       }),
     });
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body.data.searchListings.ok).toBe(false);
-    expect(body.data.searchListings.error.code).toBe('INTERNAL_ERROR');
-    expect(body.data.searchListings.error.message).toBe('An unexpected database error occurred.');
-    expect(body.data.searchListings.error.message).not.toContain('Database connection lost');
-    expect(body.data.searchListings.error.field).toBeNull();
+    expect(body.data.searchListings).toBeNull();
+    expect(body.errors).toBeDefined();
+    expect(body.errors[0].message).toBe('An unexpected database error occurred.');
+    expect(body.errors[0].message).not.toContain('Database connection lost');
+    expect(body.errors[0].extensions.code).toBe('INTERNAL_SERVER_ERROR');
     expect(consoleSpy).toHaveBeenCalledWith(
       'executeSearch internal error:',
       expect.any(Error)
     );
   });
 
-  it('catches thrown unexpected errors in resolver with 500 status and sanitized message', async () => {
+  it('catches thrown unexpected errors in resolver and surfaces sanitized GraphQL error', async () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(searchService, 'executeSearch').mockRejectedValueOnce(
       new Error('Catastrophic failure')
@@ -299,22 +306,22 @@ describe('GraphQL searchListings endpoint', () => {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        query: `query Search { searchListings { ok error { code message } } }`,
+        query: `query Search { searchListings { __typename } }`,
       }),
     });
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body.data.searchListings.ok).toBe(false);
-    expect(body.data.searchListings.error.code).toBe('INTERNAL_ERROR');
-    expect(body.data.searchListings.error.message).toBe('An unexpected internal error occurred.');
-    expect(body.data.searchListings.error.message).not.toContain('Catastrophic failure');
+    expect(body.data.searchListings).toBeNull();
+    expect(body.errors[0].extensions.code).toBe('INTERNAL_SERVER_ERROR');
+    expect(body.errors[0].message).toBe('An unexpected internal error occurred.');
+    expect(body.errors[0].message).not.toContain('Catastrophic failure');
     expect(consoleSpy).toHaveBeenCalledWith(
       'GraphQL resolver internal error:',
       expect.any(Error)
     );
   });
 
-  it('handles non-Error thrown in resolver with 500 status and sanitized message', async () => {
+  it('handles non-Error thrown in resolver and surfaces sanitized GraphQL error', async () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(searchService, 'executeSearch').mockRejectedValueOnce('raw string error');
 
@@ -322,15 +329,15 @@ describe('GraphQL searchListings endpoint', () => {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        query: `query Search { searchListings { ok error { code message } } }`,
+        query: `query Search { searchListings { __typename } }`,
       }),
     });
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body.data.searchListings.ok).toBe(false);
-    expect(body.data.searchListings.error.code).toBe('INTERNAL_ERROR');
-    expect(body.data.searchListings.error.message).toBe('An unexpected internal error occurred.');
-    expect(body.data.searchListings.error.message).not.toContain('raw string error');
+    expect(body.data.searchListings).toBeNull();
+    expect(body.errors[0].extensions.code).toBe('INTERNAL_SERVER_ERROR');
+    expect(body.errors[0].message).toBe('An unexpected internal error occurred.');
+    expect(body.errors[0].message).not.toContain('raw string error');
     expect(consoleSpy).toHaveBeenCalledWith(
       'GraphQL resolver internal error:',
       'raw string error'
@@ -407,9 +414,11 @@ describe('startServer lifecycle and HTTP execution', () => {
       body: JSON.stringify({
         query: `query Search($input: SearchListingsInput!) {
           searchListings(input: $input) {
-            ok
-            listings { id city }
-            pagination { totalResults }
+            __typename
+            ... on SearchListingsSuccess {
+              listings { id city }
+              pagination { totalResults }
+            }
           }
         }`,
         variables: { input: { city: 'Austin', page: 1, pageSize: 5 } },
@@ -418,7 +427,7 @@ describe('startServer lifecycle and HTTP execution', () => {
 
     const body = await response.json();
     expect(response.status).toBe(200);
-    expect(body.data.searchListings.ok).toBe(true);
+    expect(body.data.searchListings.__typename).toBe('SearchListingsSuccess');
     expect(body.data.searchListings.listings.length).toBeGreaterThan(0);
 
     await serverInstance.stop();

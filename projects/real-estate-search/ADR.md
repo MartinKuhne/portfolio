@@ -16,17 +16,18 @@ This document records the architectural decisions and implementation rulings mad
 
 ---
 
-## ADR-002: Custom `JSONScalar` Pass-Through & GraphQL Yoga HTTP Status Mapping
+## ADR-002: Custom `JSONScalar` Pass-Through & GraphQL Union Errors as Data
 
-- **Status:** Accepted
-- **Context:** Standard GraphQL `Int`/`Float` input scalars reject or coerce malformed primitives at the GraphQL parser layer before resolvers execute. This conflicts with `REQ-VAL-003` (reject invalid inputs without coercing), `REQ-ERR-004` (explicit error status), and `REQ-ERR-005` (structured `{ code, message, field }` error payload). Additionally, `SearchListingsPayload.listings` is typed as `[Listing!]!`, which throws a GraphQL Non-Null violation if omitted on error responses.
+- **Status:** Accepted (updated to align with GraphQL & GraphQL-over-HTTP conventions)
+- **Context:** Standard GraphQL `Int`/`Float` input scalars reject or coerce malformed primitives at the GraphQL parser layer before resolvers execute, conflicting with `REQ-VAL-003` and `REQ-ERR-005`. Previously, the API also forced HTTP `400`/`500` on valid `{ data }` responses using a flat `{ ok, listings, pagination, error }` wrapper, which violates GraphQL-over-HTTP conventions and breaks standard GraphQL clients.
 - **Decision:**
-  1. Define a pass-through `JSONScalar` in [server.ts](./packages/api/src/graphql/server.ts) for numeric/integer GraphQL input fields so raw values reach `validateSearchInput` uncoerced.
-  2. Use GraphQL Yoga's `onResponse` hook to set HTTP status `400` on `VALIDATION_ERROR` / `OUT_OF_RANGE` and `500` on `INTERNAL_ERROR` while preserving the structured GraphQL JSON payload.
-  3. Always default `listings` to `[]` and `pagination` to `null` in the resolver return object when an error occurs.
+  1. Keep pass-through `JSONScalar` in [server.ts](./packages/api/src/graphql/server.ts) for numeric/integer GraphQL input fields so raw values reach `validateSearchInput` uncoerced (`REQ-VAL-003`).
+  2. Model `Query.searchListings` as a nullable **GraphQL Union** (`SearchListingsResult = SearchListingsSuccess | SearchValidationError | SearchOutOfRangeError`) with a `SearchErrorCode` enum and shared `interface SearchError`, returned over HTTP **`200 OK`** per GraphQL-over-HTTP.
+  3. Surface unexpected internal/database faults (`INTERNAL_ERROR` or unhandled resolver exceptions) as standard GraphQL top-level `errors` via `GraphQLError` (`extensions.code = "INTERNAL_SERVER_ERROR"`) with masked/sanitized messages and `data.searchListings = null`.
 - **Consequences:**
-  - Clients querying the full selection set (`ok`, `listings`, `pagination`, `error`) receive both HTTP 400/500 status codes and the structured field-level error object without GraphQL nullability errors.
-  - Trade-off: Input schema types rely on `JSONScalar` documentation (`README.md`) and `validateSearchInput` rather than GraphQL built-in scalar rejection.
+  - Any GraphQL-compliant client (including browser `fetch`, GraphiQL, or Apollo Client) receives standard HTTP `200 OK` execution envelopes, discriminated union results for domain errors, and top-level `errors` for internal faults.
+  - Malformed HTTP/JSON payloads and invalid GraphQL syntax/documents still return HTTP `400 Bad Request` directly from GraphQL Yoga.
+  - Trade-off: Numeric input fields still use `JSONScalar` instead of `Int`/`Float` so per-field `SearchValidationError` responses preserve uncoerced field-level error reporting.
 
 ---
 
@@ -105,7 +106,7 @@ This document records the architectural decisions and implementation rulings mad
 - **Context:** Operators need end-to-end visibility across browser search interactions, GraphQL HTTP handling, input validation, and PostgreSQL queries (`COUNT` and ranked `SELECT`), with browser-to-API trace continuity and trace-correlated logs.
 - **Decision:**
   1. Instrument `@real-estate/api` ([telemetry.ts](./packages/api/src/telemetry.ts)) with `NodeTracerProvider`, `BatchSpanProcessor` (`scheduledDelayMillis: 500`), `W3CTraceContextPropagator`, and `LoggerProvider` emitting single-line JSON console logs plus span events (`addEvent`). OTLP trace export activates when `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is configured; OTLP log export only activates when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is explicitly set (avoiding `/v1/logs` 404s against Jaeger).
-  2. Instrument GraphQL Yoga ([server.ts](./packages/api/src/graphql/server.ts)) via its `instrumentation.request` and `onResponse` hooks to extract incoming W3C `traceparent`/`tracestate` headers case-insensitively, create `SpanKind.SERVER` spans (leaving span status `UNSET` on 4xx client errors and setting `SpanStatusCode.ERROR` only on 5xx/unhandled exceptions per OTel HTTP semantic conventions), allow `traceparent`/`tracestate` in CORS preflight headers, and instrument search execution ([executeSearch.ts](./packages/api/src/search/executeSearch.ts)) with `SpanKind.INTERNAL` (`search.execute`, `search.validateInput`) and `SpanKind.CLIENT` (`search.db.count`, `search.db.query`) child spans.
+  2. Instrument GraphQL Yoga ([server.ts](./packages/api/src/graphql/server.ts)) via its `instrumentation.request` and `onResponse` hooks to extract incoming W3C `traceparent`/`tracestate` headers case-insensitively, create `SpanKind.SERVER` spans (leaving span status `UNSET` on 4xx or domain union errors and setting `SpanStatusCode.ERROR` on 5xx/GraphQL internal errors or unhandled exceptions), allow `traceparent`/`tracestate` in CORS preflight headers, and instrument search execution ([executeSearch.ts](./packages/api/src/search/executeSearch.ts)) with `SpanKind.INTERNAL` (`search.execute`, `search.validateInput`) and `SpanKind.CLIENT` (`search.db.count`, `search.db.query`) child spans.
   3. Instrument `@real-estate/ui` ([telemetry.ts](./packages/ui/src/telemetry.ts), [searchClient.ts](./packages/ui/src/api/searchClient.ts), [App.tsx](./packages/ui/src/App.tsx)) with `WebTracerProvider`, `BatchSpanProcessor` (`scheduledDelayMillis: 250`), and `LoggerProvider`, using `SpanKind.INTERNAL` on `ui.searchListings` and `SpanKind.CLIENT` on `HTTP POST /graphql`, injecting W3C `traceparent`/`tracestate` headers into `fetch('/graphql')`, and passing explicit span contexts across async boundaries so browser `StackContextManager` never loses trace correlation across `await`.
   4. Add `jaeger` (`jaegertracing/all-in-one:latest`, `COLLECTOR_OTLP_ENABLED=true`) to [docker-compose.yml](./docker-compose.yml) on ports `16686`, `4317`, and `4318`, and proxy `/v1/traces` through both [vite.config.ts](./packages/ui/vite.config.ts) and [nginx.conf](./packages/ui/nginx.conf).
 - **Consequences:**
