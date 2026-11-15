@@ -10,15 +10,22 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.realestate.api.db.InMemoryListingRepository;
 import com.realestate.api.db.SeedListings;
 import com.realestate.api.domain.ListingRepository;
+import com.realestate.api.graphql.GraphqlPayloads.SearchValidationErrorPayload;
 import com.realestate.api.scoring.DefaultRelevanceScorer;
 import com.realestate.api.search.SearchService;
 import com.realestate.api.telemetry.ApiTelemetry;
 import com.realestate.api.telemetry.TelemetryConfig;
+import graphql.GraphQLContext;
+import graphql.schema.DataFetchingEnvironmentImpl;
+import graphql.schema.FieldCoordinates;
+import graphql.schema.GraphQLSchema;
+import io.javalin.http.HttpResponseException;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.sdk.testing.exporter.InMemorySpanExporter;
 import io.opentelemetry.sdk.trace.data.SpanData;
 import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.net.URI;
@@ -27,6 +34,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
@@ -507,6 +515,135 @@ class GraphqlHttpIntegrationTest {
         } finally {
             faultyApp.stop();
         }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void handlesNonObjectInputArgumentAndNullInputWithoutInternalError() throws Exception {
+        // Explicit null input over GraphQL defaults to empty criteria (HTTP 200 success)
+        HttpResponse<String> nullInputRes = postGraphql(Map.of(
+            "query", "query { searchListings(input: null) { __typename ... on SearchListingsSuccess { pagination { page } } } }"
+        ), Map.of());
+        assertThat(nullInputRes.statusCode()).isEqualTo(200);
+        Map<String, Object> nullResult = (Map<String, Object>) ((Map<String, Object>) parseJson(nullInputRes.body()).get("data")).get("searchListings");
+        assertThat(nullResult.get("__typename")).isEqualTo("SearchListingsSuccess");
+
+        // Literal non-object searchListings(input: "hello") fails GraphQL type validation cleanly (400, not 500)
+        HttpResponse<String> literalStringRes = postGraphql(Map.of(
+            "query", "query { searchListings(input: \"hello\") { __typename ... on SearchError { code message field } } }"
+        ), Map.of());
+        assertThat(literalStringRes.statusCode()).isEqualTo(400);
+        assertThat(parseJson(literalStringRes.body())).containsKey("errors");
+
+        // Direct DataFetcher invocation with non-Map input returns SearchValidationError instead of ClassCastException
+        InMemoryListingRepository repo = new InMemoryListingRepository(new DefaultRelevanceScorer(), telemetry.tracer());
+        SeedListings.seedDatabase(repo);
+        SearchService service = new SearchService(repo, new com.realestate.api.validation.DefaultSearchValidator(), telemetry);
+        GraphQLSchema schema = GraphqlSchemaFactory.buildSchema(service, telemetry);
+        var fetcher = schema.getCodeRegistry().getDataFetcher(
+            FieldCoordinates.coordinates("Query", "searchListings"),
+            schema.getQueryType().getFieldDefinition("searchListings")
+        );
+        Object payload = fetcher.get(
+            DataFetchingEnvironmentImpl.newDataFetchingEnvironment()
+                .graphQLContext(GraphQLContext.getDefault())
+                .arguments(Map.of("input", "hello"))
+                .build()
+        );
+        assertThat(payload).isInstanceOf(SearchValidationErrorPayload.class);
+        SearchValidationErrorPayload errPayload = (SearchValidationErrorPayload) payload;
+        assertThat(errPayload.code()).isEqualTo("VALIDATION_ERROR");
+        assertThat(errPayload.message()).isEqualTo("Search input must be an object.");
+        assertThat(errPayload.field()).isNull();
+    }
+
+    @Test
+    void rejectsOversizedContentLengthAndChunkedBodiesWithHttp413AndHandlesHttpResponseException() throws Exception {
+        int overLimit = GraphqlHttpApp.MAX_REQUEST_BODY_BYTES + 1;
+        byte[] oversized = new byte[overLimit];
+        Arrays.fill(oversized, (byte) ' ');
+        oversized[0] = '{';
+        oversized[oversized.length - 1] = '}';
+
+        // 1. Content-Length > 1 MiB -> 413
+        HttpResponse<String> contentLength413 = HTTP.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl))
+                .header("content-type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofByteArray(oversized))
+                .build(),
+            HttpResponse.BodyHandlers.ofString()
+        );
+        assertThat(contentLength413.statusCode()).isEqualTo(413);
+        assertThat(contentLength413.body()).contains("PAYLOAD_TOO_LARGE");
+
+        SpanData span413 = spanExporter.getFinishedSpanItems().stream()
+            .filter(s -> s.getName().equals("POST /graphql"))
+            .findFirst()
+            .orElseThrow();
+        assertThat(span413.getStatus().getStatusCode()).isEqualTo(StatusCode.UNSET);
+
+        // 2. Chunked Transfer-Encoding > 1 MiB -> 413
+        HttpResponse<String> chunked413 = HTTP.send(
+            HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl))
+                .header("content-type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofInputStream(() -> new ByteArrayInputStream(oversized)))
+                .build(),
+            HttpResponse.BodyHandlers.ofString()
+        );
+        assertThat(chunked413.statusCode()).isEqualTo(413);
+        assertThat(chunked413.body()).contains("PAYLOAD_TOO_LARGE");
+
+        // 3. HttpResponseException preserves HTTP status rather than turning into 500
+        graphql.GraphQL customHttpExGraphQL = graphql.GraphQL.newGraphQL(
+                GraphqlSchemaFactory.buildSchema(
+                    new SearchService(new InMemoryListingRepository(), new com.realestate.api.validation.DefaultSearchValidator(), telemetry),
+                    telemetry
+                )
+            )
+            .preparsedDocumentProvider((executionInput, parseFn) -> {
+                throw new HttpResponseException(418, "Teapot rejected");
+            })
+            .build();
+        GraphqlHttpApp httpExApp = new GraphqlHttpApp(customHttpExGraphQL, telemetry, CorsConfig.fromEnvValue(null)).start(0);
+        try {
+            HttpResponse<String> res = HTTP.send(
+                HttpRequest.newBuilder()
+                    .uri(URI.create("http://127.0.0.1:" + httpExApp.port() + "/graphql"))
+                    .header("content-type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"query\":\"{ searchListings { __typename } }\"}"))
+                    .build(),
+                HttpResponse.BodyHandlers.ofString()
+            );
+            assertThat(res.statusCode()).isEqualTo(418);
+            assertThat(res.body()).contains("Teapot rejected");
+        } finally {
+            httpExApp.stop();
+        }
+    }
+
+    @Test
+    void rejectsRootFragmentComplexityBypassesAndCombinedLiteralVariableDepthOverHttp() throws Exception {
+        StringBuilder rootFragFields = new StringBuilder();
+        for (int i = 0; i < 11; i++) {
+            rootFragFields.append("q").append(i).append(": searchListings { __typename } ");
+        }
+        HttpResponse<String> rootFragRes = postGraphql(Map.of(
+            "query", "query { ...RootFrag } fragment RootFrag on Query { " + rootFragFields + " }"
+        ), Map.of());
+        assertThat(rootFragRes.statusCode()).isEqualTo(400);
+        assertThat(rootFragRes.body()).contains("maximum allowed root field count");
+
+        // Combined literal depth (3) + variable depth (3) = 6 > 5 -> BAD_USER_INPUT (not INTERNAL_SERVER_ERROR)
+        HttpResponse<String> combinedDepthRes = postGraphql(Map.of(
+            "query", "query($v: JSONScalar) { searchListings(input: { minPrice: { a: { b: { c: $v } } } }) { __typename } }",
+            "variables", Map.of("v", Map.of("d", Map.of("e", Map.of("f", 1))))
+        ), Map.of());
+        assertThat(combinedDepthRes.statusCode()).isEqualTo(200);
+        assertThat(combinedDepthRes.body()).contains("BAD_USER_INPUT");
+        assertThat(combinedDepthRes.body()).contains("nesting exceeds maximum allowed depth");
+        assertThat(combinedDepthRes.body()).doesNotContain("INTERNAL_SERVER_ERROR");
     }
 
     private HttpResponse<String> postGraphql(Map<String, Object> body, Map<String, String> headers) throws Exception {

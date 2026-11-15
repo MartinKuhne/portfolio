@@ -54,13 +54,13 @@ Each listing matching the active filters is assigned a numeric relevance score b
 
 ### Budget Proximity Score
 
-The budget proximity score measures the closeness of the listing price to the user's target budget:
+The budget proximity score measures the closeness of the listing price to the user's target budget without sub-score clamping:
 
-$$\text{budgetProximity} = \text{clamp}\left(1 - \frac{|\text{price} - \text{targetBudget}|}{\text{targetBudget}}, 0.00, 1.00\right)$$
+$$\text{budgetProximity} = \frac{1}{1 + \frac{|\text{price} - \text{targetBudget}|}{\text{targetBudget}}}$$
 
 - If `targetBudget <= 0`, `price < 0`, or either input is non-finite, the budget proximity score evaluates to `0.00`.
 - A listing whose price exactly equals `targetBudget` achieves a budget proximity of `1.00`.
-- As the absolute difference increases, the score decreases linearly, bounded at `0.00` when the deviation reaches or exceeds 100% of the target budget.
+- As the absolute relative difference $|\text{price} - \text{targetBudget}| / \text{targetBudget}$ increases, the score decays smoothly in `(0.00, 1.00]` without clamping to `0.00` at $2 \times \text{targetBudget}$, ensuring strictly higher budget proximity for closer prices across all budgets (`REQ-RNK-004`).
 
 ### Recency Score
 
@@ -78,8 +78,7 @@ $$\text{recency} = \text{clamp}\left(1 - \frac{\text{ageDays}}{\text{MAX\_RECENC
 ### Clamping, Rounding, & Deterministic Tie-Breakers
 
 - **Bounding & Rounding:**
-  - All intermediate and final component scores are clamped to `[0.00, 1.00]`.
-  - The final relevance score is rounded to two decimal places: `Math.round(clamp(raw, 0, 1) * 100) / 100`.
+  - `budgetProximity` is naturally bounded in `(0.00, 1.00]` without clamping; the final relevance score is clamped to `[0.00, 1.00]` (`REQ-RNK-007`) and rounded to two decimal places: `Math.round(clamp(raw, 0, 1) * 100) / 100`.
 
 - **Deterministic Sort Ordering:**
   When sorting matching listings, the search engine applies a 3-tier deterministic ordering hierarchy:

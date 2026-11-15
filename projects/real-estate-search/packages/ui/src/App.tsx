@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { context, SpanStatusCode, trace } from '@opentelemetry/api';
-import { Alert, Container, Typography } from '@mui/material';
+import { Alert, Box, Container, MenuItem, TextField, Typography } from '@mui/material';
 import {
   type Listing,
   type PaginationMeta,
@@ -8,7 +8,13 @@ import {
   type SearchResponse,
   validateSearchInput,
 } from '@real-estate/shared';
-import { fetchSearchListings } from './api/searchClient.js';
+import {
+  API_BACKENDS,
+  type ApiBackendId,
+  fetchSearchListings,
+  getApiBackendOption,
+  type SearchRequestOptions,
+} from './api/searchClient.js';
 import { ListingResults } from './components/ListingResults.js';
 import { PaginationBar } from './components/PaginationBar.js';
 import { SearchForm, type SearchFormState } from './components/SearchForm.js';
@@ -43,13 +49,15 @@ function toRawSearchInput(form: SearchFormState, page: number): RawSearchInput {
 export interface AppProps {
   searchFn?: (
     rawInput: RawSearchInput,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options?: SearchRequestOptions
   ) => Promise<SearchResponse>;
 }
 
 export function App({
   searchFn = fetchSearchListings,
 }: AppProps): React.JSX.Element {
+  const [apiBackend, setApiBackend] = useState<ApiBackendId>('node');
   const [formState, setFormState] = useState<SearchFormState>(DEFAULT_FORM_STATE);
   const [listings, setListings] = useState<Listing[]>([]);
   const [pagination, setPagination] = useState<PaginationMeta | null>(null);
@@ -60,9 +68,15 @@ export function App({
   const requestIdRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
   const activeFormRef = useRef<SearchFormState>(DEFAULT_FORM_STATE);
+  const activeBackendRef = useRef<ApiBackendId>('node');
 
   const runSearch = useCallback(
-    async (form: SearchFormState, page: number, action: SearchTriggerAction) => {
+    async (
+      form: SearchFormState,
+      page: number,
+      action: SearchTriggerAction,
+      backendId: ApiBackendId = activeBackendRef.current
+    ) => {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
@@ -72,15 +86,23 @@ export function App({
       const requestId = ++requestIdRef.current;
       setLoading(true);
 
+      const backendConfig = getApiBackendOption(backendId);
       const actionSpan = getTracer().startSpan('ui.user.search', {
         attributes: {
           'ui.action': action,
           'search.page': page,
+          'api.backend': backendConfig.id,
+          'url.path': backendConfig.endpoint,
         },
       });
       const actionCtx = trace.setSpan(context.active(), actionSpan);
 
-      logUi('INFO', 'ui.search.submitted', { 'ui.action': action, 'search.page': page }, actionCtx);
+      logUi(
+        'INFO',
+        'ui.search.submitted',
+        { 'ui.action': action, 'search.page': page, 'api.backend': backendConfig.id },
+        actionCtx
+      );
 
       const rawInput = toRawSearchInput(form, page);
       const validation = validateSearchInput(rawInput);
@@ -91,6 +113,7 @@ export function App({
           'ui.search.client_validation_failed',
           {
             'ui.action': action,
+            'api.backend': backendConfig.id,
             'error.code': validation.error.code,
             'error.field': validation.error.field ?? '',
           },
@@ -109,7 +132,12 @@ export function App({
 
       try {
         const response = await context.with(actionCtx, () =>
-          searchFn(rawInput, controller.signal)
+          backendConfig.id === 'node'
+            ? searchFn(rawInput, controller.signal)
+            : searchFn(rawInput, controller.signal, {
+                backend: backendConfig.id,
+                endpoint: backendConfig.endpoint,
+              })
         );
         if (requestId !== requestIdRef.current) {
           logUi(
@@ -193,15 +221,21 @@ export function App({
     setFormState((prev) => ({ ...prev, [field]: value }));
   };
 
+  const handleBackendChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setApiBackend(e.target.value as ApiBackendId);
+  };
+
   const handleSearch = () => {
     activeFormRef.current = formState;
-    runSearch(formState, 1, 'search');
+    activeBackendRef.current = apiBackend;
+    runSearch(formState, 1, 'search', apiBackend);
   };
 
   const handleReset = () => {
     setFormState(DEFAULT_FORM_STATE);
     activeFormRef.current = DEFAULT_FORM_STATE;
-    runSearch(DEFAULT_FORM_STATE, 1, 'reset');
+    activeBackendRef.current = apiBackend;
+    runSearch(DEFAULT_FORM_STATE, 1, 'reset', apiBackend);
   };
 
   const handlePreviousPage = () => {
@@ -218,9 +252,35 @@ export function App({
 
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>
-      <Typography variant="h4" component="h1" gutterBottom fontWeight="bold">
-        Real Estate Search
-      </Typography>
+      <Box
+        sx={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: 2,
+          mb: 3,
+        }}
+      >
+        <Typography variant="h4" component="h1" fontWeight="bold">
+          Real Estate Search
+        </Typography>
+        <TextField
+          select
+          size="small"
+          id="api-backend"
+          label="API Backend"
+          value={apiBackend}
+          onChange={handleBackendChange}
+          sx={{ minWidth: 220 }}
+        >
+          {API_BACKENDS.map((backend) => (
+            <MenuItem key={backend.id} value={backend.id}>
+              {backend.label}
+            </MenuItem>
+          ))}
+        </TextField>
+      </Box>
 
       {/* Search remains enabled during loading so users can submit a new search and cancel in-flight stale requests */}
       <SearchForm

@@ -91,7 +91,7 @@ public final class SearchQueryBuilder {
 
         String rawSql;
         if (targetBudget != null) {
-            rawSql = "(?::double precision * GREATEST(0.0, LEAST(1.0, 1.0 - ABS(price::double precision - ?::double precision) / ?::double precision)) + ?::double precision * " + recencySql + ")";
+            rawSql = "(?::double precision * (1.0 / (1.0 + ABS(price::double precision - ?::double precision) / ?::double precision)) + ?::double precision * " + recencySql + ")";
             params.add(DefaultRelevanceScorer.BUDGET_WEIGHT);
             params.add(targetBudget);
             params.add(targetBudget);

@@ -44,8 +44,8 @@ func TestBuildCountQuery_Unfiltered(t *testing.T) {
 }
 
 func TestBuildCountQuery_Filtered(t *testing.T) {
-	minP := 200000
-	maxP := 500000
+	minP := 200000.5
+	maxP := 500000.75
 	minB := 2
 	city := "Austin"
 	kw := "pool"
@@ -61,13 +61,13 @@ func TestBuildCountQuery_Filtered(t *testing.T) {
 	}
 
 	query, args := repository.BuildCountQuery(input)
-	if !strings.Contains(query, "WHERE price >= $1::numeric AND price <= $2::numeric AND bedrooms >= $3 AND LOWER(city) = LOWER($4) AND description ILIKE $5 ESCAPE '\\\\'") {
+	if !strings.Contains(query, "WHERE price >= $1::numeric AND price <= $2::numeric AND bedrooms >= $3 AND LOWER(city) = LOWER($4) AND description ILIKE $5 ESCAPE '\\'") {
 		t.Errorf("unexpected filtered count query: %s", query)
 	}
 	if len(args) != 5 {
 		t.Fatalf("expected 5 args, got %d", len(args))
 	}
-	if args[0] != 200000 || args[1] != 500000 || args[2] != 2 || args[3] != "Austin" || args[4] != "%pool%" {
+	if args[0] != 200000.5 || args[1] != 500000.75 || args[2] != 2 || args[3] != "Austin" || args[4] != "%pool%" {
 		t.Errorf("unexpected args: %+v", args)
 	}
 }
@@ -86,7 +86,7 @@ func TestBuildSelectQuery_WithTargetBudgetAndPagination(t *testing.T) {
 	if !strings.Contains(query, "SELECT internal_id, id, source") {
 		t.Errorf("missing select columns: %s", query)
 	}
-	if !strings.Contains(query, "ABS(price - $1)::double precision / $1::double precision") {
+	if !strings.Contains(query, "1.0 / (1.0 + ABS(price - $1)::double precision / $1::double precision)") {
 		t.Errorf("missing parameterized budget scoring expression: %s", query)
 	}
 	if !strings.Contains(query, "WHERE LOWER(city) = LOWER($2)") {

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/graphql-go/graphql/language/ast"
+	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -82,7 +83,7 @@ func setupTestHandler(t *testing.T) (*gql.Handler, repository.Repository) {
 		},
 	}
 
-	if _, err := repo.InsertOrBackfillListings(ctx, listings); err != nil {
+	if _, err := repo.InsertListingsIdempotently(ctx, listings); err != nil {
 		t.Fatalf("failed to insert test listings: %v", err)
 	}
 
@@ -435,6 +436,12 @@ func TestGraphQL_CORS_OptionsAndAllowedOrigins(t *testing.T) {
 	if wAllowed.Header().Get("Access-Control-Allow-Origin") != "http://localhost:5173" {
 		t.Errorf("expected allow origin header set to http://localhost:5173, got %s", wAllowed.Header().Get("Access-Control-Allow-Origin"))
 	}
+	if wAllowed.Header().Get("Vary") != "Origin" {
+		t.Errorf("expected Vary: Origin header, got %q", wAllowed.Header().Get("Vary"))
+	}
+	if wAllowed.Header().Get("Access-Control-Allow-Methods") != "POST, OPTIONS" {
+		t.Errorf("expected Access-Control-Allow-Methods 'POST, OPTIONS', got %q", wAllowed.Header().Get("Access-Control-Allow-Methods"))
+	}
 	allowHeaders := strings.ToLower(wAllowed.Header().Get("Access-Control-Allow-Headers"))
 	if !strings.Contains(allowHeaders, "traceparent") || !strings.Contains(allowHeaders, "tracestate") {
 		t.Errorf("expected traceparent and tracestate in allowed headers: %s", allowHeaders)
@@ -541,14 +548,19 @@ func TestJSONScalar_ASTParsingAndSecurity(t *testing.T) {
 		t.Errorf("unexpected object: %v", objVal)
 	}
 
-	// Depth limit rejection (> 5 levels)
+	// Depth limit rejection (> 5 levels): ParseLiteral returns nil (never panics), ParseLiteralChecked returns error
 	var deepNode ast.Value = &ast.IntValue{Value: "1"}
 	for i := 0; i < 7; i++ {
 		deepNode = &ast.ListValue{Values: []ast.Value{deepNode}}
 	}
-	assertPanics(t, func() { gql.ParseLiteral(deepNode) }, "Input literal nesting exceeds maximum allowed depth.")
+	if val := gql.ParseLiteral(deepNode); val != nil {
+		t.Errorf("expected nil for deep literal, got %v", val)
+	}
+	if _, err := gql.ParseLiteralChecked(deepNode); err == nil || !strings.Contains(err.Error(), "Input literal nesting exceeds maximum allowed depth.") {
+		t.Errorf("expected depth limit error, got %v", err)
+	}
 
-	// Prototype pollution key rejection
+	// Prototype pollution key rejection: ParseLiteral returns nil (never panics), ParseLiteralChecked returns error
 	for _, forbidden := range []string{"__proto__", "constructor", "prototype"} {
 		badObj := &ast.ObjectValue{
 			Fields: []*ast.ObjectField{
@@ -558,7 +570,12 @@ func TestJSONScalar_ASTParsingAndSecurity(t *testing.T) {
 				},
 			},
 		}
-		assertPanics(t, func() { gql.ParseLiteral(badObj) }, "Invalid input object key.")
+		if val := gql.ParseLiteral(badObj); val != nil {
+			t.Errorf("expected nil for forbidden key %s, got %v", forbidden, val)
+		}
+		if _, err := gql.ParseLiteralChecked(badObj); err == nil || !strings.Contains(err.Error(), "Invalid input object key.") {
+			t.Errorf("expected forbidden key error for %s, got %v", forbidden, err)
+		}
 	}
 
 	// Serialize and ParseValue pass-through
@@ -570,25 +587,253 @@ func TestJSONScalar_ASTParsingAndSecurity(t *testing.T) {
 	}
 }
 
-func assertPanics(t *testing.T, fn func(), expectedMessage string) {
-	t.Helper()
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Errorf("expected panic containing %q, but code did not panic", expectedMessage)
-			return
+func TestGraphQL_ServeHTTP_LiteralAndVariableSecurity(t *testing.T) {
+	handler, _ := setupTestHandler(t)
+
+	// 1. Inline literal nesting > 5 returns HTTP 400 BAD_USER_INPUT without panicking
+	deepLiteralQuery := `query { searchListings(input: { minPrice: [[[[[[1]]]]]] }) { __typename } }`
+	reqBody, _ := json.Marshal(map[string]any{"query": deepLiteralQuery})
+	req := httptest.NewRequest(http.MethodPost, "/graphql", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "BAD_USER_INPUT") {
+		t.Errorf("expected HTTP 400 BAD_USER_INPUT for deep inline literal, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 2. Inline forbidden keys (__proto__, constructor, prototype) return HTTP 400 BAD_USER_INPUT
+	for _, forbidden := range []string{"__proto__", "constructor", "prototype"} {
+		q := fmt.Sprintf(`query { searchListings(input: { minPrice: { %s: "x" } }) { __typename } }`, forbidden)
+		body, _ := json.Marshal(map[string]any{"query": q})
+		r := httptest.NewRequest(http.MethodPost, "/graphql", bytes.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, r)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "BAD_USER_INPUT") {
+			t.Errorf("expected HTTP 400 BAD_USER_INPUT for inline %s, got %d: %s", forbidden, rec.Code, rec.Body.String())
 		}
-		var msg string
-		if err, ok := r.(error); ok {
-			msg = err.Error()
-		} else {
-			msg = fmt.Sprint(r)
+	}
+
+	// 3. Variable forbidden keys and excessive nesting return HTTP 400 BAD_USER_INPUT
+	varQuery := `query Search($input: SearchListingsInput) { searchListings(input: $input) { __typename } }`
+	for _, badVars := range []map[string]any{
+		{"input": map[string]any{"minPrice": map[string]any{"__proto__": "x"}}},
+		{"input": map[string]any{"minPrice": map[string]any{"constructor": "x"}}},
+		{"input": map[string]any{"minPrice": map[string]any{"prototype": "x"}}},
+		{"input": map[string]any{"minPrice": []any{[]any{[]any{[]any{[]any{[]any{1}}}}}}}},
+	} {
+		body, _ := json.Marshal(map[string]any{"query": varQuery, "variables": badVars})
+		r := httptest.NewRequest(http.MethodPost, "/graphql", bytes.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, r)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "BAD_USER_INPUT") {
+			t.Errorf("expected HTTP 400 BAD_USER_INPUT for bad variables %+v, got %d: %s", badVars, rec.Code, rec.Body.String())
 		}
-		if !strings.Contains(msg, expectedMessage) {
-			t.Errorf("expected panic containing %q, got %q", expectedMessage, msg)
+	}
+}
+
+func TestGraphQL_StrictNonCoercion_CityAndKeyword(t *testing.T) {
+	handler, _ := setupTestHandler(t)
+
+	// Inline non-string literals must NEVER coerce to string
+	for _, literal := range []string{`123`, `true`, `["Austin"]`, `{a: "Austin"}`} {
+		for _, field := range []string{"city", "keyword"} {
+			q := fmt.Sprintf(`query { searchListings(input: { %s: %s }) { __typename } }`, field, literal)
+			body, _ := json.Marshal(map[string]any{"query": q})
+			r := httptest.NewRequest(http.MethodPost, "/graphql", bytes.NewReader(body))
+			r.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, r)
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "BAD_USER_INPUT") {
+				t.Errorf("expected HTTP 400 BAD_USER_INPUT for inline %s=%s, got %d: %s", field, literal, rec.Code, rec.Body.String())
+			}
 		}
-	}()
-	fn()
+	}
+
+	// Non-string variables must NEVER coerce to string
+	varQuery := `query Search($input: SearchListingsInput) { searchListings(input: $input) { __typename } }`
+	for _, bad := range []any{123, true, []any{"Austin"}, map[string]any{"a": 1}} {
+		for _, field := range []string{"city", "keyword"} {
+			body, _ := json.Marshal(map[string]any{
+				"query":     varQuery,
+				"variables": map[string]any{"input": map[string]any{field: bad}},
+			})
+			r := httptest.NewRequest(http.MethodPost, "/graphql", bytes.NewReader(body))
+			r.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, r)
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "BAD_USER_INPUT") {
+				t.Errorf("expected HTTP 400 BAD_USER_INPUT for variable %s=%#v, got %d: %s", field, bad, rec.Code, rec.Body.String())
+			}
+		}
+	}
+}
+
+func TestGraphQL_FragmentComplexityBypassesAndCycles(t *testing.T) {
+	handler, _ := setupTestHandler(t)
+
+	// 1. Inline fragment > 10 root fields
+	aliased := make([]string, 11)
+	for i := 0; i < 11; i++ {
+		aliased[i] = fmt.Sprintf("q%d: searchListings { __typename }", i)
+	}
+	inlineBypass := fmt.Sprintf("query { ... on Query { %s } }", strings.Join(aliased, " "))
+
+	// 2. Named fragment spread > 10 root fields
+	spreadBypass := fmt.Sprintf("query { ...Many } fragment Many on Query { %s }", strings.Join(aliased, " "))
+
+	// 3. Named fragment spread > 15 depth
+	nested := "__typename"
+	for i := 0; i < 16; i++ {
+		nested = fmt.Sprintf("... on SearchListingsResult { %s }", nested)
+	}
+	deepSpread := fmt.Sprintf("query { searchListings { ...Deep } } fragment Deep on SearchListingsResult { %s }", nested)
+
+	// 4. Fragment cycle
+	cycleQuery := `query { searchListings { ...A } } fragment A on SearchListingsResult { ...B } fragment B on SearchListingsResult { ...A }`
+
+	for _, tc := range []struct {
+		name  string
+		query string
+	}{
+		{"inline fragment root fields", inlineBypass},
+		{"named fragment root fields", spreadBypass},
+		{"named fragment depth", deepSpread},
+		{"fragment cycle", cycleQuery},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, _ := json.Marshal(map[string]any{"query": tc.query})
+			r := httptest.NewRequest(http.MethodPost, "/graphql", bytes.NewReader(body))
+			r.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, r)
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "BAD_USER_INPUT") {
+				t.Errorf("%s: expected HTTP 400 BAD_USER_INPUT, got %d: %s", tc.name, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestGraphQL_BodySizeLimit(t *testing.T) {
+	handler, _ := setupTestHandler(t)
+
+	oversized := strings.Repeat("a", (1<<20)+100)
+	req := httptest.NewRequest(http.MethodPost, "/graphql", strings.NewReader(oversized))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected HTTP 413 for >1MiB body, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGraphQL_PartialDataAndLogStatusAttribute(t *testing.T) {
+	ctx := context.Background()
+	exporter := tracetest.NewInMemoryExporter()
+	processor := sdktrace.NewSimpleSpanProcessor(exporter)
+	_ = telemetry.ShutdownTelemetry(ctx)
+	_ = telemetry.InitTelemetry(ctx, func(opts *telemetry.TelemetryOptions) {
+		opts.SpanProcessors = []sdktrace.SpanProcessor{processor}
+	})
+	defer func() { _ = telemetry.ShutdownTelemetry(ctx) }()
+
+	var logBuf bytes.Buffer
+	telemetry.SetLogOutput(&logBuf)
+	defer telemetry.SetLogOutput(nil)
+
+	failRepo := &failingRepo{Repository: repository.NewMemoryRepository()}
+	svc := search.NewService(failRepo)
+	schema, err := gql.BuildSchema(svc)
+	if err != nil {
+		t.Fatalf("failed to build schema: %v", err)
+	}
+	handler := gql.NewHandler(schema)
+
+	// Aliased field must be preserved in result.Data when resolver fails
+	query := `query { first: searchListings(input: { city: "Austin" }) { __typename } }`
+	reqBody, _ := json.Marshal(map[string]any{"query": query})
+	req := httptest.NewRequest(http.MethodPost, "/graphql", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d", w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	dataMap, ok := resp["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected data map, got %T", resp["data"])
+	}
+	if _, hasAlias := dataMap["first"]; !hasAlias {
+		t.Errorf("expected aliased field 'first' to be preserved in data, got: %+v", dataMap)
+	}
+
+	// Verify server span status is Error
+	var foundErrorServerSpan bool
+	for _, s := range exporter.GetSpans() {
+		if s.Name == "POST /graphql" && s.Status.Code == codes.Error {
+			foundErrorServerSpan = true
+		}
+	}
+	if !foundErrorServerSpan {
+		t.Errorf("expected POST /graphql server span to have codes.Error status")
+	}
+
+	// Verify log entry uses http.response.status_code and http.request.failed
+	logs := logBuf.String()
+	if !strings.Contains(logs, `"http.request.failed"`) {
+		t.Errorf("expected http.request.failed log event, got: %s", logs)
+	}
+	if !strings.Contains(logs, `"http.response.status_code":200`) {
+		t.Errorf("expected http.response.status_code attribute in logs, got: %s", logs)
+	}
+	if strings.Contains(logs, `"http.response.status":`) {
+		t.Errorf("unexpected stale http.response.status key in logs: %s", logs)
+	}
+}
+
+func TestGraphQL_DecimalMinPriceEndToEnd(t *testing.T) {
+	handler, _ := setupTestHandler(t)
+
+	// Setup has LST-001 at 450000 and LST-002 at 550000.
+	// minPrice: 450000.5 must exclude LST-001 (450000) and return only LST-002 (550000).
+	query := `query Search($input: SearchListingsInput!) {
+		searchListings(input: $input) {
+			__typename
+			... on SearchListingsSuccess {
+				listings { id price }
+				pagination { totalResults }
+			}
+		}
+	}`
+	reqBody, _ := json.Marshal(map[string]any{
+		"query": query,
+		"variables": map[string]any{
+			"input": map[string]any{
+				"minPrice": 450000.5,
+			},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/graphql", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "LST-002") || strings.Contains(body, "LST-001") {
+		t.Errorf("expected only LST-002 when minPrice=450000.5, got: %s", body)
+	}
 }
 
 func TestGraphQL_TraceparentPropagation(t *testing.T) {

@@ -62,28 +62,29 @@ class ApiTelemetryTest {
 
     @Test
     void normalizesHeadersCaseInsensitivelyAndExtractsW3cTraceparent() {
-        ApiTelemetry telemetry = ApiTelemetry.initGlobal(TelemetryConfig.fromMap(Map.of()));
-        String traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
-        String parentSpanId = "00f067aa0ba902b7";
-        String traceparent = "00-" + traceId + "-" + parentSpanId + "-01";
+        try (ApiTelemetry telemetry = ApiTelemetry.create(TelemetryConfig.fromMap(Map.of()))) {
+            String traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+            String parentSpanId = "00f067aa0ba902b7";
+            String traceparent = "00-" + traceId + "-" + parentSpanId + "-01";
 
-        assertThat(HeaderTraceExtractor.normalizeHeaders(null)).isEmpty();
-        assertThat(HeaderTraceExtractor.normalizeMultiHeaders(null)).isEmpty();
+            assertThat(HeaderTraceExtractor.normalizeHeaders(null)).isEmpty();
+            assertThat(HeaderTraceExtractor.normalizeMultiHeaders(null)).isEmpty();
 
-        Map<String, String> multi = HeaderTraceExtractor.normalizeMultiHeaders(Map.of(
-            "TRACEPARENT", List.of(traceparent),
-            "X-Multi", List.of("a", "b")
-        ));
-        assertThat(multi).containsEntry("traceparent", traceparent).containsEntry("x-multi", "a,b");
+            Map<String, String> multi = HeaderTraceExtractor.normalizeMultiHeaders(Map.of(
+                "TRACEPARENT", List.of(traceparent),
+                "X-Multi", List.of("a", "b")
+            ));
+            assertThat(multi).containsEntry("traceparent", traceparent).containsEntry("x-multi", "a,b");
 
-        Context extracted = telemetry.extractTraceContext(Map.of(
-            "TraceParent", traceparent,
-            "TraceState", "congo=t61rcWkgMzE"
-        ));
-        SpanContext spanContext = Span.fromContext(extracted).getSpanContext();
-        assertThat(spanContext.isValid()).isTrue();
-        assertThat(spanContext.getTraceId()).isEqualTo(traceId);
-        assertThat(spanContext.getSpanId()).isEqualTo(parentSpanId);
+            Context extracted = telemetry.extractTraceContext(Map.of(
+                "TraceParent", traceparent,
+                "TraceState", "congo=t61rcWkgMzE"
+            ));
+            SpanContext spanContext = Span.fromContext(extracted).getSpanContext();
+            assertThat(spanContext.isValid()).isTrue();
+            assertThat(spanContext.getTraceId()).isEqualTo(traceId);
+            assertThat(spanContext.getSpanId()).isEqualTo(parentSpanId);
+        }
     }
 
     @Test

@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,12 +19,19 @@ import (
 	"real-estate-search/internal/telemetry"
 )
 
-func main() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+func resolveListenAddr() string {
+	port := 4000
+	if pStr := os.Getenv("PORT"); pStr != "" {
+		if p, err := strconv.Atoi(pStr); err == nil && p >= 0 {
+			port = p
+		}
+	}
+	return fmt.Sprintf(":%d", port)
+}
 
+func run(ctx context.Context, addr string, readyCh chan<- string) error {
 	if err := telemetry.InitTelemetry(ctx); err != nil {
-		log.Fatalf("Failed to initialize OpenTelemetry: %v", err)
+		return fmt.Errorf("failed to initialize OpenTelemetry: %w", err)
 	}
 	defer func() {
 		shutdownCtx, sCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -31,26 +40,27 @@ func main() {
 	}()
 
 	var repo repository.Repository
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL != "" {
+	if dbURL := os.Getenv("DATABASE_URL"); dbURL != "" {
 		pgRepo, err := repository.NewPostgresRepository(ctx, dbURL)
 		if err != nil {
-			log.Fatalf("Failed to initialize Postgres repository: %v", err)
+			return fmt.Errorf("failed to initialize Postgres repository: %w", err)
 		}
 		repo = pgRepo
-		defer repo.Close()
 	} else {
 		repo = repository.NewMemoryRepository()
 	}
+	defer func() {
+		_ = repo.Close()
+	}()
 
 	if err := repository.SeedDatabase(ctx, repo); err != nil {
-		log.Fatalf("Failed to seed database: %v", err)
+		return fmt.Errorf("failed to seed database: %w", err)
 	}
 
 	searchService := search.NewService(repo)
 	schema, err := gql.BuildSchema(searchService)
 	if err != nil {
-		log.Fatalf("Failed to build GraphQL schema: %v", err)
+		return fmt.Errorf("failed to build GraphQL schema: %w", err)
 	}
 
 	handler := gql.NewHandler(schema)
@@ -62,39 +72,62 @@ func main() {
 		_, _ = w.Write([]byte("OK"))
 	})
 
-	port := 4000
-	if pStr := os.Getenv("PORT"); pStr != "" {
-		if p, err := strconv.Atoi(pStr); err == nil && p > 0 {
-			port = p
-		}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("failed to bind listener on %s: %w", addr, err)
 	}
 
-	addr := fmt.Sprintf(":%d", port)
+	boundPort := 0
+	if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok {
+		boundPort = tcpAddr.Port
+	}
+
 	server := &http.Server{
-		Addr:    addr,
-		Handler: mux,
+		Addr:              ln.Addr().String(),
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
+	telemetry.LogApi(ctx, telemetry.SeverityInfo, "INFO", "server.started", map[string]any{
+		"server.port": boundPort,
+		"url.full":    fmt.Sprintf("http://localhost:%d/graphql", boundPort),
+	})
+
+	if readyCh != nil {
+		readyCh <- ln.Addr().String()
+	}
+
+	serveErrCh := make(chan error, 1)
 	go func() {
-		telemetry.LogApi(ctx, telemetry.SeverityInfo, "INFO", "server.started", map[string]any{
-			"server.port": port,
-			"url.full":    fmt.Sprintf("http://localhost:%d/graphql", port),
-		})
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP server error: %v", err)
+		if err := server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErrCh <- err
+			return
 		}
+		serveErrCh <- nil
 	}()
 
-	stopSignal := make(chan os.Signal, 1)
-	signal.Notify(stopSignal, syscall.SIGINT, syscall.SIGTERM)
-	<-stopSignal
+	select {
+	case err := <-serveErrCh:
+		return err
+	case <-ctx.Done():
+		telemetry.LogApi(context.Background(), telemetry.SeverityInfo, "INFO", "server.stopping", nil)
+		shutdownCtx, sCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer sCancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("server shutdown error: %w", err)
+		}
+		return <-serveErrCh
+	}
+}
 
-	telemetry.LogApi(ctx, telemetry.SeverityInfo, "INFO", "server.stopping", nil)
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	shutdownCtx, sCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer sCancel()
-
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("Server shutdown error: %v", err)
+	if err := run(ctx, resolveListenAddr(), nil); err != nil {
+		log.Fatalf("%v", err)
 	}
 }

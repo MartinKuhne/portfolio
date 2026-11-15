@@ -30,7 +30,7 @@ type LogEntry struct {
 	Body           string         `json:"body"`
 	TraceID        *string        `json:"traceId"`
 	SpanID         *string        `json:"spanId"`
-	TraceFlags     *string        `json:"traceFlags"`
+	TraceFlags     *int           `json:"traceFlags"`
 	Attributes     map[string]any `json:"attributes,omitempty"`
 }
 
@@ -43,6 +43,10 @@ var (
 func SetLogOutput(w io.Writer) {
 	logMu.Lock()
 	defer logMu.Unlock()
+	if w == nil {
+		logOutput = os.Stdout
+		return
+	}
 	logOutput = w
 }
 
@@ -51,16 +55,17 @@ func LogApi(ctx context.Context, severityNumber SeverityNumber, severityText, bo
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 	service := getServiceName()
 
-	var traceIDStr, spanIDStr, traceFlagsStr *string
+	var traceIDStr, spanIDStr *string
+	var traceFlagsVal *int
 	span := trace.SpanFromContext(ctx)
 	if span.SpanContext().IsValid() {
 		sc := span.SpanContext()
 		tid := sc.TraceID().String()
 		sid := sc.SpanID().String()
-		tflags := sc.TraceFlags().String()
+		tf := int(sc.TraceFlags())
 		traceIDStr = &tid
 		spanIDStr = &sid
-		traceFlagsStr = &tflags
+		traceFlagsVal = &tf
 
 		// Add event to active span
 		var otelAttrs []attribute.KeyValue
@@ -89,7 +94,7 @@ func LogApi(ctx context.Context, severityNumber SeverityNumber, severityText, bo
 		Body:           body,
 		TraceID:        traceIDStr,
 		SpanID:         spanIDStr,
-		TraceFlags:     traceFlagsStr,
+		TraceFlags:     traceFlagsVal,
 		Attributes:     attrs,
 	}
 

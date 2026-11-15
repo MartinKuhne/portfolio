@@ -204,7 +204,7 @@ func parseBoundedString(value any, fieldName string, maxLength int) boundedStrin
 // ValidateSearchInput validates uncoerced search input per SPEC.md (REQ-VAL-002..012).
 func ValidateSearchInput(raw domain.RawSearchInput) Result {
 	// 1. minPrice
-	var minPrice *int
+	var minPrice *float64
 	minRes := parseNumeric(raw.MinPrice, "minPrice")
 	if minRes.err != nil {
 		return Result{OK: false, Error: minRes.err}
@@ -217,12 +217,12 @@ func ValidateSearchInput(raw domain.RawSearchInput) Result {
 		if minRes.parsed > domain.MaxPgInt {
 			return validationError(&f, fmt.Sprintf("minPrice must not exceed %d.", domain.MaxPgInt))
 		}
-		val := int(minRes.parsed)
+		val := minRes.parsed
 		minPrice = &val
 	}
 
 	// 2. maxPrice
-	var maxPrice *int
+	var maxPrice *float64
 	maxRes := parseNumeric(raw.MaxPrice, "maxPrice")
 	if maxRes.err != nil {
 		return Result{OK: false, Error: maxRes.err}
@@ -235,7 +235,7 @@ func ValidateSearchInput(raw domain.RawSearchInput) Result {
 		if maxRes.parsed > domain.MaxPgInt {
 			return validationError(&f, fmt.Sprintf("maxPrice must not exceed %d.", domain.MaxPgInt))
 		}
-		val := int(maxRes.parsed)
+		val := maxRes.parsed
 		maxPrice = &val
 	}
 

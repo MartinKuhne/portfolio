@@ -3,6 +3,7 @@ package graphql
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -15,6 +16,8 @@ import (
 
 	"real-estate-search/internal/telemetry"
 )
+
+const maxRequestBodyBytes = 1 << 20 // 1 MiB
 
 type requestPayload struct {
 	Query         string         `json:"query"`
@@ -69,8 +72,9 @@ func NewHandler(schema graphql.Schema) *Handler {
 func (h *Handler) handleCORS(w http.ResponseWriter, r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin != "" && h.allowedOrigin[origin] {
+		w.Header().Add("Vary", "Origin")
 		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "content-type, traceparent, tracestate")
 	}
 
@@ -112,17 +116,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		span.SetAttributes(attribute.Int("http.response.status_code", http.StatusBadRequest))
+		status := http.StatusBadRequest
+		errMsg := "Failed to read request body."
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			status = http.StatusRequestEntityTooLarge
+			errMsg = "Request body exceeds maximum allowed size."
+		}
+
+		span.SetAttributes(attribute.Int("http.response.status_code", status))
 		telemetry.LogApi(ctx, telemetry.SeverityWarn, "WARN", "http.request.rejected", map[string]any{
-			"http.request.method":  method,
-			"url.path":             path,
-			"http.response.status": http.StatusBadRequest,
+			"http.request.method":       method,
+			"url.path":                  path,
+			"http.response.status_code": status,
 		})
-		w.WriteHeader(http.StatusBadRequest)
+		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(graphQLResponse{
-			Errors: []sanitizedError{{Message: "Failed to read request body."}},
+			Errors: []sanitizedError{{Message: errMsg}},
 		})
 		return
 	}
@@ -131,9 +144,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		span.SetAttributes(attribute.Int("http.response.status_code", http.StatusBadRequest))
 		telemetry.LogApi(ctx, telemetry.SeverityWarn, "WARN", "http.request.rejected", map[string]any{
-			"http.request.method":  method,
-			"url.path":             path,
-			"http.response.status": http.StatusBadRequest,
+			"http.request.method":       method,
+			"url.path":                  path,
+			"http.response.status_code": http.StatusBadRequest,
 		})
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(graphQLResponse{
@@ -142,13 +155,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate query complexity (root field count & selection depth)
-	if err := CheckQueryComplexity(req.Query); err != nil {
+	// Validate query complexity, fragment cycles, literal security, and strict input types
+	if err := ValidateGraphQLRequest(req.Query, req.Variables); err != nil {
 		span.SetAttributes(attribute.Int("http.response.status_code", http.StatusBadRequest))
 		telemetry.LogApi(ctx, telemetry.SeverityWarn, "WARN", "http.request.rejected", map[string]any{
-			"http.request.method":  method,
-			"url.path":             path,
-			"http.response.status": http.StatusBadRequest,
+			"http.request.method":       method,
+			"url.path":                  path,
+			"http.response.status_code": http.StatusBadRequest,
 		})
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(graphQLResponse{
@@ -177,9 +190,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if len(result.Errors) > 0 && result.Data == nil && !serverCtx.HasInternalError {
 		span.SetAttributes(attribute.Int("http.response.status_code", http.StatusBadRequest))
 		telemetry.LogApi(ctx, telemetry.SeverityWarn, "WARN", "http.request.rejected", map[string]any{
-			"http.request.method":  method,
-			"url.path":             path,
-			"http.response.status": http.StatusBadRequest,
+			"http.request.method":       method,
+			"url.path":                  path,
+			"http.response.status_code": http.StatusBadRequest,
 		})
 		w.WriteHeader(http.StatusBadRequest)
 		errs := make([]sanitizedError, len(result.Errors))
@@ -195,42 +208,52 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	span.SetAttributes(attribute.Int("http.response.status_code", http.StatusOK))
 
-	if serverCtx.HasInternalError {
+	if serverCtx.HasInternalError || len(result.Errors) > 0 {
 		span.SetStatus(codes.Error, "GraphQL INTERNAL_SERVER_ERROR")
 		telemetry.LogApi(ctx, telemetry.SeverityError, "ERROR", "http.request.failed", map[string]any{
-			"http.request.method":  method,
-			"url.path":             path,
-			"http.response.status": http.StatusOK,
+			"http.request.method":       method,
+			"url.path":                  path,
+			"http.response.status_code": http.StatusOK,
 		})
 
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"data": map[string]any{
-				"searchListings": nil,
-			},
-			"errors": []sanitizedError{
-				{
-					Message: "An unexpected internal error occurred.",
-					Extensions: &sanitizedErrorExtension{
-						Code: "INTERNAL_SERVER_ERROR",
-					},
+		errCount := len(result.Errors)
+		if errCount == 0 {
+			errCount = 1
+		}
+		sanitizedErrs := make([]sanitizedError, errCount)
+		for i := 0; i < errCount; i++ {
+			sanitizedErrs[i] = sanitizedError{
+				Message: "An unexpected internal error occurred.",
+				Extensions: &sanitizedErrorExtension{
+					Code: "INTERNAL_SERVER_ERROR",
 				},
-			},
+			}
+		}
+
+		data := result.Data
+		if data == nil {
+			data = map[string]any{"searchListings": nil}
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(graphQLResponse{
+			Data:   data,
+			Errors: sanitizedErrs,
 		})
 		return
 	}
 
 	if serverCtx.HasDomainError {
 		telemetry.LogApi(ctx, telemetry.SeverityWarn, "WARN", "http.request.rejected", map[string]any{
-			"http.request.method":  method,
-			"url.path":             path,
-			"http.response.status": http.StatusOK,
+			"http.request.method":       method,
+			"url.path":                  path,
+			"http.response.status_code": http.StatusOK,
 		})
 	} else {
 		telemetry.LogApi(ctx, telemetry.SeverityInfo, "INFO", "http.request.completed", map[string]any{
-			"http.request.method":  method,
-			"url.path":             path,
-			"http.response.status": http.StatusOK,
+			"http.request.method":       method,
+			"url.path":                  path,
+			"http.response.status_code": http.StatusOK,
 		})
 	}
 

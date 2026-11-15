@@ -3,8 +3,8 @@ package com.realestate.api.db;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
+import java.io.ByteArrayOutputStream;
 import java.net.URI;
-import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
@@ -12,6 +12,10 @@ import java.util.Objects;
  * Factory and URI parser for PostgreSQL {@link HikariDataSource} instances.
  */
 public final class PostgresDataSourceFactory {
+
+    public static final long CONNECTION_TIMEOUT_MS = 10_000L;
+    public static final int PG_CONNECT_TIMEOUT_SECONDS = 5;
+    public static final int PG_SOCKET_TIMEOUT_SECONDS = 15;
 
     /**
      * Parsed JDBC connection parameters extracted from a PostgreSQL URI or JDBC URL.
@@ -93,6 +97,9 @@ public final class PostgresDataSourceFactory {
         hikari.setMaximumPoolSize(10);
         hikari.setMinimumIdle(1);
         hikari.setPoolName("real-estate-hikari");
+        hikari.setConnectionTimeout(CONNECTION_TIMEOUT_MS);
+        hikari.addDataSourceProperty("connectTimeout", String.valueOf(PG_CONNECT_TIMEOUT_SECONDS));
+        hikari.addDataSourceProperty("socketTimeout", String.valueOf(PG_SOCKET_TIMEOUT_SECONDS));
         return hikari;
     }
 
@@ -145,7 +152,34 @@ public final class PostgresDataSourceFactory {
         }
     }
 
-    private static String decode(String value) {
-        return URLDecoder.decode(value, StandardCharsets.UTF_8);
+    static String decode(String value) {
+        if (value == null || value.indexOf('%') < 0) {
+            return value;
+        }
+        ByteArrayOutputStream out = new ByteArrayOutputStream(value.length());
+        int i = 0;
+        int len = value.length();
+        while (i < len) {
+            char c = value.charAt(i);
+            if (c == '%') {
+                if (i + 2 >= len) {
+                    throw new IllegalArgumentException("Malformed percent-encoding in PostgreSQL URL userinfo");
+                }
+                int hi = Character.digit(value.charAt(i + 1), 16);
+                int lo = Character.digit(value.charAt(i + 2), 16);
+                if (hi < 0 || lo < 0) {
+                    throw new IllegalArgumentException("Invalid hex escape in PostgreSQL URL userinfo");
+                }
+                out.write((hi << 4) | lo);
+                i += 3;
+            } else {
+                int start = i;
+                while (i < len && value.charAt(i) != '%') {
+                    i++;
+                }
+                out.writeBytes(value.substring(start, i).getBytes(StandardCharsets.UTF_8));
+            }
+        }
+        return out.toString(StandardCharsets.UTF_8);
     }
 }

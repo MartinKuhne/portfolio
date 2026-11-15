@@ -53,7 +53,7 @@ func BuildWhereClause(input domain.ValidatedSearchInput, argStart int) (string, 
 	}
 
 	if input.Keyword != nil && *input.Keyword != "" {
-		conditions = append(conditions, fmt.Sprintf("description ILIKE $%d ESCAPE '\\\\'", argIndex))
+		conditions = append(conditions, fmt.Sprintf("description ILIKE $%d ESCAPE '\\'", argIndex))
 		args = append(args, "%"+EscapeLike(*input.Keyword)+"%")
 		argIndex++
 	}
@@ -79,7 +79,7 @@ func BuildRelevanceScoreExpr(targetBudget *float64, argIndex int) (string, []any
 	var rawExpr string
 	if targetBudget != nil {
 		rawExpr = fmt.Sprintf(
-			"(%.2f::double precision * GREATEST(0.0, LEAST(1.0, 1.0 - ABS(price - $%d)::double precision / $%d::double precision)) + %.2f::double precision * %s)",
+			"(%.2f::double precision * (1.0 / (1.0 + ABS(price - $%d)::double precision / $%d::double precision)) + %.2f::double precision * %s)",
 			domain.BudgetWeight,
 			argIndex,
 			argIndex,

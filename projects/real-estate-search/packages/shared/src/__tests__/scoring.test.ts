@@ -38,8 +38,8 @@ describe('relevance scoring (REQ-RNK-001..007)', () => {
       expect(far).toBeGreaterThanOrEqual(0);
     });
 
-    it('returns 0 when price is zero (diff equals target budget)', () => {
-      expect(computeBudgetProximityScore(0, 500000)).toBe(0);
+    it('returns 0.5 when price is zero (diff equals target budget)', () => {
+      expect(computeBudgetProximityScore(0, 500000)).toBe(0.5);
     });
 
     it('returns 0 when targetBudget is <= 0 or not finite', () => {
@@ -55,8 +55,15 @@ describe('relevance scoring (REQ-RNK-001..007)', () => {
       expect(computeBudgetProximityScore(Number.POSITIVE_INFINITY, 500000)).toBe(0);
     });
 
-    it('clamps to 0 when price is more than twice the target budget', () => {
-      expect(computeBudgetProximityScore(1500000, 500000)).toBe(0);
+    it('preserves strict monotonicity without clamping when price exceeds 2x targetBudget (REQ-RNK-004)', () => {
+      const tripleBudget = computeBudgetProximityScore(1500000, 500000);
+      const midOver = computeBudgetProximityScore(350000, 100000);
+      const farOver = computeBudgetProximityScore(990000, 100000);
+
+      expect(tripleBudget).toBeCloseTo(1 / 3, 10);
+      expect(midOver).toBeCloseTo(1 / 3.5, 10);
+      expect(farOver).toBeCloseTo(1 / 9.9, 10);
+      expect(midOver).toBeGreaterThan(farOver);
     });
   });
 
@@ -108,14 +115,14 @@ describe('relevance scoring (REQ-RNK-001..007)', () => {
       });
       expect(perfectScore).toBe(1);
 
-      // Price off by 50% (proximity = 0.5), listed today (recency = 1) -> 0.6 * 0.5 + 0.4 * 1 = 0.70
+      // Price off by 50% (proximity = 1 / 1.5 = 2/3), listed today (recency = 1) -> 0.6 * (2/3) + 0.4 * 1 = 0.80
       const mixedScore = computeRelevanceScore({
         price: 750000,
         listedDate: '2026-11-01T00:00:00.000Z',
         targetBudget: 500000,
         referenceDate: '2026-11-01T00:00:00.000Z'
       });
-      expect(mixedScore).toBe(0.7);
+      expect(mixedScore).toBe(0.8);
     });
 
     it('bounds and rounds relevance scores to [0.00, 1.00] even for future dates or extreme prices (REQ-RNK-007)', () => {
@@ -126,7 +133,7 @@ describe('relevance scoring (REQ-RNK-001..007)', () => {
         referenceDate: '2026-11-01T00:00:00.000Z'
       });
       const extremeScore = computeRelevanceScore({
-        price: 5000000,
+        price: 100000000,
         listedDate: '2020-01-01T00:00:00.000Z',
         targetBudget: 100000,
         referenceDate: '2026-11-01T00:00:00.000Z'

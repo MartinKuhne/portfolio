@@ -56,7 +56,7 @@ export function buildRelevanceScoreExpr(targetBudget?: number): SQL<number> {
 
   const rawExpr =
     targetBudget !== undefined
-      ? sql`(${BUDGET_WEIGHT}::double precision * GREATEST(0.0, LEAST(1.0, 1.0 - ABS(${listingsTable.price} - ${targetBudget})::double precision / ${targetBudget}::double precision)) + ${RECENCY_WEIGHT}::double precision * ${recencyExpr})`
+      ? sql`(${BUDGET_WEIGHT}::double precision * (1.0 / (1.0 + ABS(${listingsTable.price} - ${targetBudget})::double precision / ${targetBudget}::double precision)) + ${RECENCY_WEIGHT}::double precision * ${recencyExpr})`
       : recencyExpr;
 
   return sql<number>`ROUND(GREATEST(0.0, LEAST(1.0, ${rawExpr}))::numeric, 2)::double precision`;

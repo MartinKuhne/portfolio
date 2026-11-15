@@ -7,8 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 
+	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -109,6 +112,12 @@ func TestStructuredLogging_WithTraceCorrelation(t *testing.T) {
 	if entry.SpanID == nil || *entry.SpanID != span.SpanContext().SpanID().String() {
 		t.Errorf("expected correlated spanId %s, got %v", span.SpanContext().SpanID().String(), entry.SpanID)
 	}
+	if entry.TraceFlags == nil || *entry.TraceFlags != 1 {
+		t.Errorf("expected integer traceFlags 1, got %v", entry.TraceFlags)
+	}
+	if !strings.Contains(output, `"traceFlags":1`) {
+		t.Errorf("expected raw JSON to contain integer \"traceFlags\":1, got: %s", output)
+	}
 
 	// Verify span event correlation
 	spans := exporter.GetSpans()
@@ -131,11 +140,82 @@ func TestStructuredLogging_OutsideSpan(t *testing.T) {
 		t.Fatalf("failed to unmarshal entry: %v", err)
 	}
 
-	if entry.TraceID != nil || entry.SpanID != nil {
-		t.Errorf("expected nil traceId and spanId outside active span, got: %v, %v", entry.TraceID, entry.SpanID)
+	if entry.TraceID != nil || entry.SpanID != nil || entry.TraceFlags != nil {
+		t.Errorf("expected nil traceId, spanId, and traceFlags outside active span, got: %v, %v, %v", entry.TraceID, entry.SpanID, entry.TraceFlags)
 	}
 	if entry.Body != "untraced.event" {
 		t.Errorf("expected body untraced.event, got %s", entry.Body)
+	}
+}
+
+func TestTelemetry_OtlpEndpointPreservesDefaultPath(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	// Explicit OTEL_EXPORTER_OTLP_TRACES_ENDPOINT omitting path must default to /v1/traces
+	os.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", ts.URL)
+	defer os.Unsetenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+
+	ctx := context.Background()
+	_ = telemetry.ShutdownTelemetry(ctx)
+	if err := telemetry.InitTelemetry(ctx); err != nil {
+		t.Fatalf("InitTelemetry failed: %v", err)
+	}
+
+	_, span := telemetry.GetTracer().Start(ctx, "otlp.default.path")
+	span.End()
+
+	if err := telemetry.ShutdownTelemetry(ctx); err != nil {
+		t.Fatalf("ShutdownTelemetry failed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	found := false
+	for _, p := range paths {
+		if p == "/v1/traces" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected exported traces to hit /v1/traces when path omitted, got paths: %v", paths)
+	}
+}
+
+func TestExtractTraceContext_MultiValueHeadersJoined(t *testing.T) {
+	ctx := context.Background()
+	_ = telemetry.InitTelemetry(ctx)
+	defer func() { _ = telemetry.ShutdownTelemetry(ctx) }()
+
+	traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
+	parentSpanID := "00f067aa0ba902b7"
+	traceparent := "00-" + traceID + "-" + parentSpanID + "-01"
+
+	headers := http.Header{}
+	headers.Add("TraceParent", traceparent)
+	headers.Add("TraceState", "rojo=00f067aa0ba902b7")
+	headers.Add("TraceState", "congo=t61rcWkgMzE")
+
+	extractedCtx := telemetry.ExtractTraceContext(ctx, headers)
+	spanCtx := trace.SpanContextFromContext(extractedCtx)
+	ts := spanCtx.TraceState().String()
+	if !strings.Contains(ts, "rojo=00f067aa0ba902b7") || !strings.Contains(ts, "congo=t61rcWkgMzE") {
+		t.Errorf("expected multi-value tracestate joined with comma, got %q", ts)
+	}
+
+	// Verify carrier also works with propagator.Inject
+	carrier := make(telemetry.CaseInsensitiveCarrier)
+	propagation.TraceContext{}.Inject(extractedCtx, carrier)
+	if carrier.Get("tracestate") == "" {
+		t.Errorf("expected injected tracestate in carrier")
 	}
 }
 

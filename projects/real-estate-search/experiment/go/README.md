@@ -10,7 +10,7 @@ This directory (`experiment/go`) provides an idiomatic, production-grade Go impl
 |---|---|---|
 | **Language & Runtime** | Go 1.23 (`golang:1.23-alpine`) | High-performance compiled concurrency, minimal container footprint, and robust standard library (`net/http`, `sync`, `time`). |
 | **GraphQL Engine** | `github.com/graphql-go/graphql` | Pure Go implementation matching GraphQL-JS semantics. Supports custom scalar AST inspection (`JSONScalar`), union resolution, interface implementations (`SearchError`), and selection complexity analysis without external code generation binaries (`gqlgen`). |
-| **Database Driver** | `github.com/jackc/pgx/v5` (`pgxpool`) | Industry-standard PostgreSQL driver in Go. Provides connection pooling, parameterized query execution, batch upserts (`ON CONFLICT (id, source) DO UPDATE`), and native support for geometric `POINT` coordinates. |
+| **Database Driver** | `github.com/jackc/pgx/v5` (`pgxpool`) | Industry-standard PostgreSQL driver in Go. Provides connection pooling, parameterized query execution, idempotent batch inserts (`ON CONFLICT (id, source) DO NOTHING`), and native support for geometric `POINT` coordinates. |
 | **Observability (OTel)** | `go.opentelemetry.io/otel` + `exporters/otlp/otlptrace/otlptracehttp` | W3C `TraceContext` HTTP extraction/injection, semantic span lifecycle matching the Node.js API, and structured single-line JSON logs correlated with `traceId`, `spanId`, and `traceFlags`. |
 | **Validation & Scoring** | Zero-dependency pure Go domain packages | Authoritative, uncoerced validation (`internal/validation`) enforcing exact boundary limits (32-bit `INT4` 2,147,483,647 max, null-byte rejection, string bounds, and prototype pollution protection) and deterministic scoring arithmetic (`internal/scoring`). |
 
@@ -37,7 +37,7 @@ experiment/go/
     ├── repository/             # Repository interface, query builder, in-memory fake, pgx repository
     ├── search/                 # SearchService orchestrator with OTel instrumentation
     ├── telemetry/              # OTel tracer provider, W3C propagator, JSON structured logger
-    ├── importer/               # Sample JSON parser, validator, and backfill logic
+    ├── importer/               # Sample JSON parser, validator, and idempotent import logic
     └── graphql/                # Schema, JSONScalar AST parser, complexity rules, CORS handler
 ```
 
@@ -66,7 +66,7 @@ experiment/go/
 - Native 2D geometric `location POINT` with GiST index `USING gist (location)`.
 - Timestamp: `listed_date TIMESTAMPTZ NOT NULL` with `listings_listed_date_desc` index.
 - Search indexes: `listings_price_idx`, `listings_bedrooms_idx`, `listings_city_lower_idx` (`LOWER(city)`), and GIN trigram `listings_description_trgm` when `pg_trgm` is available.
-- Idempotent legacy migration in `EnsureSchema` upgrading legacy tables automatically.
+- Idempotent schema creation in `EnsureSchema` matching `client.ts` and `ADR-009`.
 
 ### OpenTelemetry Tracing & Structured Logging (`ADR-008`)
 - W3C `TraceContext` propagation: extracts `traceparent` and `tracestate` from HTTP headers case-insensitively.
@@ -101,10 +101,10 @@ docker build -t real-estate-search-go .
 
 | Package | Coverage | Key Tested Scenarios |
 |---|---|---|
-| `internal/scoring` | **100.0%** | Proximity clamp, recency date parsing, weighted score arithmetic, rounding |
+| `internal/scoring` | **100.0%** | Inverse budget proximity, recency date parsing, weighted score arithmetic, rounding |
 | `internal/search` | **100.0%** | Happy path pagination, empty results, validation rejection, out-of-range, DB errors |
 | `internal/validation` | **95.9%** | All boundary checks, 32-bit INT4 overflow, null-byte rejection, string lengths, safe integers |
-| `internal/importer` | **94.1%** | JSON parsing, candidate resolution, coordinate checks, idempotent backfilling |
+| `internal/importer` | **94.1%** | JSON parsing, candidate resolution, coordinate checks, idempotent imports |
 | `internal/telemetry` | **92.5%** | W3C header extraction, OTLP endpoint configuration, trace-correlated JSON logs, span events |
 | `internal/graphql` | **91.0%** | Schema query execution, union resolution, complexity depth/alias rejection, CORS, JSONScalar |
 | `internal/repository` | **67.3%** | Complete in-memory repository, seed data, query builder with ILIKE escaping and scoring SQL |

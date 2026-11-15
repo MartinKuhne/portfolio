@@ -35,6 +35,8 @@ import java.util.Objects;
  */
 public class PostgresListingRepository implements ListingRepository, AutoCloseable {
 
+    public static final int QUERY_TIMEOUT_SECONDS = 10;
+
     private static final DateTimeFormatter ISO_UTC_MILLIS =
         DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSX").withZone(ZoneOffset.UTC);
 
@@ -110,6 +112,7 @@ public class PostgresListingRepository implements ListingRepository, AutoCloseab
     public void ensureSchema() {
         try (Connection conn = dataSource.getConnection();
              Statement stmt = conn.createStatement()) {
+            stmt.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
             for (String ddl : SCHEMA_DDL) {
                 stmt.execute(ddl);
             }
@@ -132,6 +135,7 @@ public class PostgresListingRepository implements ListingRepository, AutoCloseab
             SearchQueryBuilder.SqlQuery query = SearchQueryBuilder.buildCountQuery(criteria);
             try (Connection conn = dataSource.getConnection();
                  PreparedStatement ps = conn.prepareStatement(query.sql())) {
+                ps.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
                 bindParameters(ps, query.parameters());
                 try (ResultSet rs = ps.executeQuery()) {
                     int count = rs.next() ? rs.getInt(1) : 0;
@@ -168,6 +172,7 @@ public class PostgresListingRepository implements ListingRepository, AutoCloseab
             SearchQueryBuilder.SqlQuery query = SearchQueryBuilder.buildPageQuery(criteria, offset);
             try (Connection conn = dataSource.getConnection();
                  PreparedStatement ps = conn.prepareStatement(query.sql())) {
+                ps.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
                 bindParameters(ps, query.parameters());
                 List<Listing> results = new ArrayList<>();
                 try (ResultSet rs = ps.executeQuery()) {
@@ -201,19 +206,24 @@ public class PostgresListingRepository implements ListingRepository, AutoCloseab
             boolean originalAutoCommit = conn.getAutoCommit();
             conn.setAutoCommit(false);
             try (PreparedStatement ps = conn.prepareStatement(INSERT_SQL)) {
+                ps.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
                 for (NewListing listing : listings) {
                     bindInsertStatement(ps, listing);
                     ps.addBatch();
                 }
                 int[] counts = ps.executeBatch();
-                conn.commit();
-
                 int inserted = 0;
                 for (int count : counts) {
-                    if (count > 0) {
+                    if (count == Statement.EXECUTE_FAILED) {
+                        throw new PersistenceException("Batch insert reported Statement.EXECUTE_FAILED");
+                    }
+                    if (count == Statement.SUCCESS_NO_INFO) {
+                        inserted += 1;
+                    } else if (count > 0) {
                         inserted += count;
                     }
                 }
+                conn.commit();
                 return inserted;
             } catch (SQLException | RuntimeException ex) {
                 try {

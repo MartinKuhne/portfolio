@@ -15,6 +15,8 @@ import com.realestate.api.graphql.GraphqlPayloads.SearchValidationErrorPayload;
 import com.realestate.api.search.SearchService;
 import com.realestate.api.telemetry.ApiTelemetry;
 import graphql.GraphQL;
+import graphql.schema.CoercingParseLiteralException;
+import graphql.schema.CoercingParseValueException;
 import graphql.schema.DataFetcher;
 import graphql.schema.GraphQLObjectType;
 import graphql.schema.GraphQLSchema;
@@ -27,6 +29,7 @@ import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.logs.Severity;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.StatusCode;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 
@@ -152,12 +155,25 @@ public final class GraphqlSchemaFactory {
                 .build(),
             span -> {
                 RequestTelemetryContext reqCtx = env.getGraphQlContext().get(REQUEST_TELEMETRY_CONTEXT_KEY);
-                Map<String, Object> inputMap = env.getArgument("input");
-                RawSearchInput rawInput = inputMap != null ? RawSearchInput.fromMap(inputMap) : RawSearchInput.empty();
 
                 SearchResult result;
                 try {
+                    Object rawArg = env.getArgument("input");
+                    RawSearchInput rawInput;
+                    if (rawArg == null) {
+                        rawInput = RawSearchInput.empty();
+                    } else if (rawArg instanceof Map<?, ?> mapArg) {
+                        rawInput = RawSearchInput.fromMap(toStringKeyMap(mapArg));
+                    } else {
+                        rawInput = null;
+                    }
                     result = searchService.executeSearch(rawInput);
+                } catch (CoercingParseLiteralException | CoercingParseValueException err) {
+                    span.recordException(err);
+                    if (reqCtx != null) {
+                        reqCtx.markDomainError();
+                    }
+                    throw err;
                 } catch (RuntimeException err) {
                     System.err.println("GraphQL resolver internal error: " + err.getMessage());
                     String safeMsg = err.getMessage() != null ? err.getMessage() : err.getClass().getSimpleName();
@@ -233,5 +249,13 @@ public final class GraphqlSchemaFactory {
             .preparsedDocumentProvider(new QueryComplexityValidator())
             .defaultDataFetcherExceptionHandler(new SanitizingDataFetcherExceptionHandler())
             .build();
+    }
+
+    private static Map<String, Object> toStringKeyMap(Map<?, ?> source) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : source.entrySet()) {
+            result.put(String.valueOf(entry.getKey()), entry.getValue());
+        }
+        return result;
     }
 }

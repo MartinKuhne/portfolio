@@ -37,6 +37,14 @@ class PostgresDataSourceFactoryTest {
         assertThat(jdbc.jdbcUrl()).isEqualTo("jdbc:postgresql://localhost:5432/mydb");
         assertThat(jdbc.username()).isNull();
         assertThat(jdbc.password()).isNull();
+
+        PostgresDataSourceFactory.JdbcConnectionConfig plusAndUtf8 = PostgresDataSourceFactory.parseConnectionUrl(
+            "postgres://user+tag:p%2Bss+word%21%C3%A9@db:5432/realestate"
+        );
+        assertThat(plusAndUtf8.username()).isEqualTo("user+tag");
+        assertThat(plusAndUtf8.password()).isEqualTo("p+ss+word!é");
+        assertThat(PostgresDataSourceFactory.decode(null)).isNull();
+        assertThat(PostgresDataSourceFactory.decode("plain+text")).isEqualTo("plain+text");
     }
 
     @Test
@@ -53,6 +61,10 @@ class PostgresDataSourceFactoryTest {
             .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> PostgresDataSourceFactory.parseConnectionUrl("postgres://localhost/"))
             .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> PostgresDataSourceFactory.decode("bad%2"))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> PostgresDataSourceFactory.decode("bad%ZZ"))
+            .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -68,6 +80,11 @@ class PostgresDataSourceFactoryTest {
         assertThat(config.getMaximumPoolSize()).isEqualTo(10);
         assertThat(config.getMinimumIdle()).isEqualTo(1);
         assertThat(config.getPoolName()).isEqualTo("real-estate-hikari");
+        assertThat(config.getConnectionTimeout()).isEqualTo(PostgresDataSourceFactory.CONNECTION_TIMEOUT_MS);
+        assertThat(config.getDataSourceProperties().getProperty("connectTimeout"))
+            .isEqualTo(String.valueOf(PostgresDataSourceFactory.PG_CONNECT_TIMEOUT_SECONDS));
+        assertThat(config.getDataSourceProperties().getProperty("socketTimeout"))
+            .isEqualTo(String.valueOf(PostgresDataSourceFactory.PG_SOCKET_TIMEOUT_SECONDS));
     }
 
     @Test

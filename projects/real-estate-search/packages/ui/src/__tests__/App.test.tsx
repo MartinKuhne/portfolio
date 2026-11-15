@@ -341,4 +341,53 @@ describe('Real Estate Search UI (REQ-UI-001..012, REQ-PAG-006..010, REQ-ERR-001.
     await user.click(screen.getByRole('button', { name: /search/i }));
     unmount();
   });
+
+  it('switches API backend via dropdown across Node.js, Go, and Java and preserves selection on Reset Filters', async () => {
+    const user = userEvent.setup();
+    const searchFn = vi.fn().mockResolvedValue(samplePage1);
+    render(<App searchFn={searchFn} />);
+
+    expect(screen.getByLabelText(/api backend/i)).toHaveTextContent('TypeScript (Node.js)');
+
+    await user.click(screen.getByLabelText(/api backend/i));
+    await user.click(screen.getByRole('option', { name: 'Go' }));
+    await user.click(screen.getByRole('button', { name: /search/i }));
+    await waitFor(() =>
+      expect(searchFn).toHaveBeenLastCalledWith(
+        expect.objectContaining({ page: 1, pageSize: '10' }),
+        expect.any(AbortSignal),
+        { backend: 'go', endpoint: '/api/go/graphql' }
+      )
+    );
+
+    await user.click(screen.getByRole('button', { name: /reset filters/i }));
+    await waitFor(() =>
+      expect(searchFn).toHaveBeenLastCalledWith(
+        expect.objectContaining({ page: 1, pageSize: '10' }),
+        expect.any(AbortSignal),
+        { backend: 'go', endpoint: '/api/go/graphql' }
+      )
+    );
+
+    await user.click(screen.getByLabelText(/api backend/i));
+    await user.click(screen.getByRole('option', { name: 'Java' }));
+    await user.click(screen.getByRole('button', { name: /search/i }));
+    await waitFor(() =>
+      expect(searchFn).toHaveBeenLastCalledWith(
+        expect.objectContaining({ page: 1, pageSize: '10' }),
+        expect.any(AbortSignal),
+        { backend: 'java', endpoint: '/api/java/graphql' }
+      )
+    );
+
+    await user.click(screen.getByLabelText(/api backend/i));
+    await user.click(screen.getByRole('option', { name: 'TypeScript (Node.js)' }));
+    await user.click(screen.getByRole('button', { name: /search/i }));
+    await waitFor(() =>
+      expect(searchFn).toHaveBeenLastCalledWith(
+        expect.objectContaining({ page: 1, pageSize: '10' }),
+        expect.any(AbortSignal)
+      )
+    );
+  });
 });

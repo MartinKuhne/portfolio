@@ -14,14 +14,16 @@ func TestComputeBudgetProximityScore(t *testing.T) {
 		t.Errorf("expected 1.0 for exact budget match, got %f", s)
 	}
 
-	// 50% difference
-	if s := scoring.ComputeBudgetProximityScore(250000, 500000); math.Abs(s-0.5) > 1e-6 {
-		t.Errorf("expected 0.5 for 50%% difference, got %f", s)
+	// 50% difference -> 1 / (1 + 0.5) = 2/3
+	if s := scoring.ComputeBudgetProximityScore(250000, 500000); math.Abs(s-(1.0/1.5)) > 1e-6 {
+		t.Errorf("expected %f for 50%% difference, got %f", 1.0/1.5, s)
 	}
 
-	// Out of range (diff >= targetBudget)
-	if s := scoring.ComputeBudgetProximityScore(1200000, 500000); s != 0.0 {
-		t.Errorf("expected 0.0 for price > 2x budget, got %f", s)
+	// Strictly decreasing beyond 2x targetBudget without clamping (REQ-RNK-004)
+	sMid := scoring.ComputeBudgetProximityScore(350000, 100000)
+	sFar := scoring.ComputeBudgetProximityScore(990000, 100000)
+	if math.Abs(sMid-(1.0/3.5)) > 1e-6 || math.Abs(sFar-(1.0/9.9)) > 1e-6 || sMid <= sFar {
+		t.Errorf("expected strictly decreasing unclamped proximity for prices > 2x budget, got %f and %f", sMid, sFar)
 	}
 
 	// Invalid inputs

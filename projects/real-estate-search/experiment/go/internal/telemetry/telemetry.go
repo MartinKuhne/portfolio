@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
@@ -50,12 +51,17 @@ func resolveTracesEndpoint() (endpoint string, path string, isInsecure bool) {
 	}
 
 	u, err := url.Parse(raw)
-	if err != nil {
+	if err != nil || u.Host == "" {
 		return raw, "/v1/traces", true
 	}
 
+	tracesPath := u.Path
+	if tracesPath == "" {
+		tracesPath = "/v1/traces"
+	}
+
 	insecure := u.Scheme == "http"
-	return u.Host, u.Path, insecure
+	return u.Host, tracesPath, insecure
 }
 
 // InitTelemetry initializes OpenTelemetry tracing with W3C propagation. Idempotent.
@@ -98,9 +104,13 @@ func InitTelemetry(ctx context.Context, opts ...func(*TelemetryOptions)) error {
 			clientOpts = append(clientOpts, otlptracehttp.WithInsecure())
 		}
 		exporter, err := otlptracehttp.New(ctx, clientOpts...)
-		if err == nil {
-			processors = append(processors, sdktrace.NewBatchSpanProcessor(exporter))
+		if err != nil {
+			return err
 		}
+		processors = append(processors, sdktrace.NewBatchSpanProcessor(
+			exporter,
+			sdktrace.WithBatchTimeout(500*time.Millisecond),
+		))
 	}
 
 	var tpOpts []sdktrace.TracerProviderOption
@@ -170,7 +180,7 @@ func ExtractTraceContext(ctx context.Context, headers http.Header) context.Conte
 	carrier := make(CaseInsensitiveCarrier)
 	for key, values := range headers {
 		if len(values) > 0 {
-			carrier[strings.ToLower(key)] = values[0]
+			carrier[strings.ToLower(key)] = strings.Join(values, ",")
 		}
 	}
 	return otel.GetTextMapPropagator().Extract(ctx, carrier)

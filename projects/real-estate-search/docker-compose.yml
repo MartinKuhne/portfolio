@@ -40,6 +40,7 @@ services:
     environment:
       PORT: 4000
       DATABASE_URL: postgres://realestate:realestate@db:5432/realestate
+      CORS_ORIGIN: http://localhost:8080,http://localhost:5173
       OTEL_SERVICE_NAME: real-estate-api
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://jaeger:4318/v1/traces
     ports:
@@ -54,6 +55,62 @@ services:
       db:
         condition: service_healthy
       jaeger:
+        condition: service_healthy
+
+  api-go:
+    build:
+      context: ./experiment/go
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    environment:
+      PORT: 4000
+      DATABASE_URL: postgres://realestate:realestate@db:5432/realestate
+      CORS_ORIGIN: http://localhost:8080,http://localhost:5173
+      OTEL_SERVICE_NAME: real-estate-api-go
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://jaeger:4318/v1/traces
+    ports:
+      - "4001:4000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/health >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    depends_on:
+      db:
+        condition: service_healthy
+      jaeger:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  api-java:
+    build:
+      context: ./experiment/java
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    environment:
+      PORT: 4000
+      DATABASE_URL: postgres://realestate:realestate@db:5432/realestate
+      CORS_ORIGIN: http://localhost:8080,http://localhost:5173
+      OTEL_SERVICE_NAME: real-estate-api-java
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://jaeger:4318/v1/traces
+    ports:
+      - "4002:4000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- 'http://127.0.0.1:4000/graphql?query=%7B__typename%7D' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      db:
+        condition: service_healthy
+      jaeger:
+        condition: service_healthy
+      api:
         condition: service_healthy
 
   ui:
@@ -71,6 +128,10 @@ services:
       start_period: 5s
     depends_on:
       api:
+        condition: service_healthy
+      api-go:
+        condition: service_healthy
+      api-java:
         condition: service_healthy
       jaeger:
         condition: service_healthy
