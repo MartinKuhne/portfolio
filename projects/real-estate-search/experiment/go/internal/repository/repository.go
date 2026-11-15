@@ -72,7 +72,7 @@ func PlanPagination(page, pageSize, totalResults int) PaginationPlan {
 type Repository interface {
 	CountMatchingListings(ctx context.Context, input domain.ValidatedSearchInput) (int, error)
 	FetchListingPage(ctx context.Context, input domain.ValidatedSearchInput, offset int) ([]domain.Listing, error)
-	InsertOrBackfillListings(ctx context.Context, records []domain.Listing) (int, error)
+	InsertListingsIdempotently(ctx context.Context, records []domain.Listing) (int, error)
 	EnsureSchema(ctx context.Context) error
 	Close() error
 }

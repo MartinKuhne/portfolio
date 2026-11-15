@@ -65,13 +65,13 @@ func TestImportSampleListings_SuccessAndIdempotency(t *testing.T) {
 		t.Errorf("expected 2 listings imported, got %d", count1)
 	}
 
-	// Second import (idempotent)
+	// Second import (idempotent: returns 0 newly inserted records)
 	count2, err := importer.ImportSampleListings(ctx, repo, path)
 	if err != nil {
 		t.Fatalf("second import failed: %v", err)
 	}
-	if count2 != 2 {
-		t.Errorf("expected 2 listings upserted, got %d", count2)
+	if count2 != 0 {
+		t.Errorf("expected 0 new listings on re-import, got %d", count2)
 	}
 }
 
@@ -197,6 +197,31 @@ func TestImportSampleListings_ValidationFailures(t *testing.T) {
 			json:    `[{"id": "A", "address": "123 Main", "city": "Springfield", "price": 400000, "bedrooms": 2, "sqft": 1200.5, "description": "d", "listedDate": "2026-01-01"}]`,
 			errPart: "sqft",
 		},
+		{
+			name:    "json null root",
+			json:    `null`,
+			errPart: "JSON array",
+		},
+		{
+			name:    "null element in array",
+			json:    `[null]`,
+			errPart: "required fields",
+		},
+		{
+			name:    "partial null longitude",
+			json:    `[{"id": "A", "address": "123 Main", "city": "Springfield", "price": 400000, "bedrooms": 2, "latitude": 38.0, "longitude": null, "description": "d", "listedDate": "2026-01-01"}]`,
+			errPart: "latitude and longitude must both be provided",
+		},
+		{
+			name:    "partial null latitude",
+			json:    `[{"id": "A", "address": "123 Main", "city": "Springfield", "price": 400000, "bedrooms": 2, "latitude": null, "longitude": -77.0, "description": "d", "listedDate": "2026-01-01"}]`,
+			errPart: "latitude and longitude must both be provided",
+		},
+		{
+			name:    "missing description key",
+			json:    `[{"id": "A", "address": "123 Main", "city": "Springfield", "price": 400000, "bedrooms": 2, "listedDate": "2026-01-01"}]`,
+			errPart: "required fields",
+		},
 	}
 
 	repo := repository.NewMemoryRepository()
@@ -208,5 +233,29 @@ func TestImportSampleListings_ValidationFailures(t *testing.T) {
 				t.Errorf("expected error containing %q, got %v", tc.errPart, err)
 			}
 		})
+	}
+}
+
+func TestImportSampleListings_EmptyDescriptionAndBothNullCoordsAllowed(t *testing.T) {
+	jsonContent := `[{
+		"id": "A-EMPTY-DESC",
+		"address": "123 Main St",
+		"city": "Springfield",
+		"price": 400000,
+		"bedrooms": 2,
+		"latitude": null,
+		"longitude": null,
+		"description": "",
+		"listedDate": "2026-01-01"
+	}]`
+
+	path := writeTempFile(t, jsonContent)
+	repo := repository.NewMemoryRepository()
+	count, err := importer.ImportSampleListings(context.Background(), repo, path)
+	if err != nil {
+		t.Fatalf("expected empty description and both-null coordinates to succeed, got: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 imported listing, got %d", count)
 	}
 }

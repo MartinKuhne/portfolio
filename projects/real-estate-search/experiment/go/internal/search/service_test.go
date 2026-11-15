@@ -80,7 +80,7 @@ func seedTestRepo(t *testing.T) repository.Repository {
 		},
 	}
 
-	if _, err := repo.InsertOrBackfillListings(ctx, listings); err != nil {
+	if _, err := repo.InsertListingsIdempotently(ctx, listings); err != nil {
 		t.Fatalf("failed to seed test repo: %v", err)
 	}
 	return repo
@@ -125,15 +125,21 @@ func TestExecuteSearch_Success(t *testing.T) {
 
 	hasExecute := false
 	hasValidate := false
+	hasDBCount := false
+	hasDBQuery := false
 	for _, name := range spanNames {
-		if name == "search.execute" {
+		switch name {
+		case "search.execute":
 			hasExecute = true
-		}
-		if name == "search.validateInput" {
+		case "search.validateInput":
 			hasValidate = true
+		case "search.db.count":
+			hasDBCount = true
+		case "search.db.query":
+			hasDBQuery = true
 		}
 	}
-	if !hasExecute || !hasValidate {
+	if !hasExecute || !hasValidate || !hasDBCount || !hasDBQuery {
 		t.Errorf("missing spans in %v", spanNames)
 	}
 }

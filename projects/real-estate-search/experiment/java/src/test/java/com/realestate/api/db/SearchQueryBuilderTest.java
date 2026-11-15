@@ -60,7 +60,7 @@ class SearchQueryBuilderTest {
         SearchQueryBuilder.SqlQuery expr = SearchQueryBuilder.buildRelevanceScoreExpr(500000.0);
 
         assertThat(expr.sql()).contains("ROUND(GREATEST(0.0, LEAST(1.0,");
-        assertThat(expr.sql()).contains("ABS(price::double precision - ?::double precision)");
+        assertThat(expr.sql()).contains("1.0 / (1.0 + ABS(price::double precision - ?::double precision) / ?::double precision)");
         assertThat(expr.sql()).contains("EXTRACT(EPOCH FROM (?::timestamptz - listed_date))");
         assertThat(expr.parameters()).containsExactly(
             DefaultRelevanceScorer.BUDGET_WEIGHT,

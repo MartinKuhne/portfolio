@@ -16,10 +16,13 @@ FROM alpine:3.20 AS runner
 
 WORKDIR /app
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata && \
+    addgroup -S appgroup && adduser -S appuser -G appgroup
 
 COPY --from=builder /bin/server /bin/server
 COPY --from=builder /bin/importer /bin/importer
+
+USER appuser
 
 EXPOSE 4000
 

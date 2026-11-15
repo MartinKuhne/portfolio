@@ -88,19 +88,26 @@ func ImportSampleListings(ctx context.Context, repo repository.Repository, fileP
 	if err := json.Unmarshal(data, &rawList); err != nil {
 		return 0, fmt.Errorf("Sample listings file contains invalid JSON: %w", err)
 	}
+	if rawList == nil {
+		return 0, fmt.Errorf("Sample listings file must contain a JSON array of listing objects.")
+	}
 
 	records := make([]domain.Listing, 0, len(rawList))
 	for i, item := range rawList {
+		if item == nil {
+			return 0, fmt.Errorf("Invalid listing record at index %d: required fields (id, address, city, price, bedrooms, description, listedDate) are missing or invalid.", i)
+		}
+
 		id, _ := item["id"].(string)
 		address, _ := item["address"].(string)
 		city, _ := item["city"].(string)
-		desc, _ := item["description"].(string)
+		desc, okDesc := item["description"].(string)
 		listedDateStr, _ := item["listedDate"].(string)
 
 		if strings.TrimSpace(id) == "" ||
 			strings.TrimSpace(address) == "" ||
 			strings.TrimSpace(city) == "" ||
-			desc == "" ||
+			!okDesc ||
 			strings.TrimSpace(listedDateStr) == "" {
 			return 0, fmt.Errorf("Invalid listing record at index %d: required fields (id, address, city, price, bedrooms, description, listedDate) are missing or invalid.", i)
 		}
@@ -167,15 +174,15 @@ func ImportSampleListings(ctx context.Context, repo repository.Repository, fileP
 			sqft = &val
 		}
 
-		latVal, hasLat := item["latitude"]
-		lonVal, hasLon := item["longitude"]
-		if hasLat != hasLon {
+		latVal := item["latitude"]
+		lonVal := item["longitude"]
+		if (latVal == nil) != (lonVal == nil) {
 			return 0, fmt.Errorf("Invalid listing record at index %d: latitude and longitude must both be provided or both omitted.", i)
 		}
 
 		var latitude *float64
 		var longitude *float64
-		if hasLat && hasLon && latVal != nil && lonVal != nil {
+		if latVal != nil && lonVal != nil {
 			latF, okLat := latVal.(float64)
 			lonF, okLon := lonVal.(float64)
 			if !okLat || math.IsNaN(latF) || math.IsInf(latF, 0) || latF < -90 || latF > 90 {
@@ -216,5 +223,5 @@ func ImportSampleListings(ctx context.Context, repo repository.Repository, fileP
 		return 0, nil
 	}
 
-	return repo.InsertOrBackfillListings(ctx, records)
+	return repo.InsertListingsIdempotently(ctx, records)
 }

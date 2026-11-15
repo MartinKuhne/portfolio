@@ -5,6 +5,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.realestate.api.domain.ListingRepository;
 import com.realestate.api.domain.NewListing;
+import com.realestate.api.scoring.DefaultRelevanceScorer;
+import com.realestate.api.telemetry.ApiTelemetry;
+import com.realestate.api.telemetry.TelemetryConfig;
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.common.AttributesBuilder;
+import io.opentelemetry.api.logs.Severity;
+import io.opentelemetry.api.trace.Tracer;
 
 import java.io.IOException;
 import java.io.PrintStream;
@@ -19,10 +26,10 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 
 /**
  * Sample listings JSON parser and standalone idempotent CLI importer matching
@@ -122,7 +129,7 @@ public final class SampleImporter {
 
     /**
      * Runs the standalone CLI import workflow against PostgreSQL when {@code databaseUrl} is set,
-     * or an in-memory repository otherwise, emitting a structured single-line JSON log entry.
+     * or an in-memory repository otherwise, emitting OpenTelemetry structured logs and OTLP exports.
      */
     public static int runImportCli(String explicitPath, String databaseUrl) {
         return runImportCli(explicitPath, databaseUrl, System.out);
@@ -134,14 +141,14 @@ public final class SampleImporter {
             databaseUrl,
             PostgresDataSourceFactory::createAndInitializeRepository,
             Path.of("").toAbsolutePath().normalize(),
-            out
+            withConsoleOut(TelemetryConfig.fromEnv(), out)
         );
     }
 
     static int runImportCli(
         String explicitPath,
         String databaseUrl,
-        java.util.function.Function<String, ListingRepository> postgresRepoFactory,
+        Function<String, ListingRepository> postgresRepoFactory,
         PrintStream out
     ) {
         return runImportCli(
@@ -156,37 +163,77 @@ public final class SampleImporter {
     static int runImportCli(
         String explicitPath,
         String databaseUrl,
-        java.util.function.Function<String, ListingRepository> postgresRepoFactory,
+        Function<String, ListingRepository> postgresRepoFactory,
         Path workingDir,
         PrintStream out
     ) {
+        Objects.requireNonNull(postgresRepoFactory, "postgresRepoFactory must not be null");
+        return runImportCli(
+            explicitPath,
+            databaseUrl,
+            (url, tracer) -> postgresRepoFactory.apply(url),
+            workingDir,
+            withConsoleOut(TelemetryConfig.fromEnv(), out)
+        );
+    }
+
+    static int runImportCli(
+        String explicitPath,
+        String databaseUrl,
+        BiFunction<String, Tracer, ListingRepository> postgresRepoFactory,
+        Path workingDir,
+        TelemetryConfig telemetryConfig
+    ) {
+        Objects.requireNonNull(postgresRepoFactory, "postgresRepoFactory must not be null");
+        Objects.requireNonNull(telemetryConfig, "telemetryConfig must not be null");
+
         boolean hasDatabaseUrl = databaseUrl != null && !databaseUrl.isBlank();
-        ListingRepository repository;
-        AutoCloseable closeable = null;
+        try (ApiTelemetry telemetry = ApiTelemetry.create(telemetryConfig)) {
+            ListingRepository repository;
+            AutoCloseable closeable = null;
 
-        if (hasDatabaseUrl) {
-            repository = postgresRepoFactory.apply(databaseUrl);
-            if (repository instanceof AutoCloseable autoCloseable) {
-                closeable = autoCloseable;
+            if (hasDatabaseUrl) {
+                repository = postgresRepoFactory.apply(databaseUrl, telemetry.tracer());
+                if (repository instanceof AutoCloseable autoCloseable) {
+                    closeable = autoCloseable;
+                }
+            } else {
+                repository = new InMemoryListingRepository(new DefaultRelevanceScorer(), telemetry.tracer());
+                repository.ensureSchema();
             }
-        } else {
-            repository = new InMemoryListingRepository();
-            repository.ensureSchema();
-        }
 
-        try {
-            int count = importSampleListings(repository, explicitPath, workingDir);
-            emitImportLog(out, hasDatabaseUrl ? "postgres" : "in-memory", count, explicitPath);
-            return count;
-        } finally {
-            if (closeable != null) {
-                try {
-                    closeable.close();
-                } catch (Exception ignored) {
-                    // Best-effort close on CLI exit
+            try {
+                int count = importSampleListings(repository, explicitPath, workingDir);
+                AttributesBuilder attrs = Attributes.builder()
+                    .put("db.system", "postgresql")
+                    .put("db.target", hasDatabaseUrl ? "postgres" : "in-memory")
+                    .put("import.count", (long) count);
+                if (explicitPath != null && !explicitPath.isBlank()) {
+                    attrs.put("import.path", explicitPath);
+                }
+                telemetry.log(Severity.INFO, "INFO", "db.import.completed", attrs.build());
+                return count;
+            } finally {
+                if (closeable != null) {
+                    try {
+                        closeable.close();
+                    } catch (Exception ignored) {
+                        // Best-effort close on CLI exit
+                    }
                 }
             }
         }
+    }
+
+    private static TelemetryConfig withConsoleOut(TelemetryConfig base, PrintStream out) {
+        return new TelemetryConfig(
+            base.serviceName(),
+            base.tracesEndpoint(),
+            base.logsEndpoint(),
+            base.additionalSpanProcessors(),
+            base.additionalLogProcessors(),
+            out
+        );
     }
 
     /**
@@ -258,8 +305,8 @@ public final class SampleImporter {
             city,
             state,
             zip,
-            (int) Math.round(priceVal),
-            (int) Math.round(bedroomsVal),
+            roundToInt(priceVal, index),
+            roundToInt(bedroomsVal, index),
             bathrooms,
             sqft,
             latitude,
@@ -268,6 +315,17 @@ public final class SampleImporter {
             description,
             normalizedListedDate
         );
+    }
+
+    private static int roundToInt(double value, int index) {
+        if (value < (double) Integer.MIN_VALUE - 0.5 || value > (double) Integer.MAX_VALUE + 0.5) {
+            throw missingRequiredFieldError(index);
+        }
+        long rounded = Math.round(value);
+        if (rounded < Integer.MIN_VALUE || rounded > Integer.MAX_VALUE) {
+            throw missingRequiredFieldError(index);
+        }
+        return (int) rounded;
     }
 
     private static String requireNonEmptyText(JsonNode item, String field, int index) {
@@ -388,36 +446,5 @@ public final class SampleImporter {
             "Invalid listing record at index " + index
                 + ": " + field + " must be a finite number between " + (int) min + " and " + (int) max + "."
         );
-    }
-
-    private static void emitImportLog(PrintStream out, String dbTarget, int count, String explicitPath) {
-        String serviceName = System.getenv("OTEL_SERVICE_NAME");
-        if (serviceName == null || serviceName.isBlank()) {
-            serviceName = "real-estate-api";
-        }
-        Map<String, Object> attrs = new LinkedHashMap<>();
-        attrs.put("db.system", "postgresql");
-        attrs.put("db.target", dbTarget);
-        attrs.put("import.count", count);
-        if (explicitPath != null && !explicitPath.isBlank()) {
-            attrs.put("import.path", explicitPath);
-        }
-
-        Map<String, Object> entry = new LinkedHashMap<>();
-        entry.put("timestamp", ISO_UTC_MILLIS.format(Instant.now()));
-        entry.put("service", serviceName.trim());
-        entry.put("severityNumber", 9);
-        entry.put("severityText", "INFO");
-        entry.put("body", "db.import.completed");
-        entry.put("traceId", null);
-        entry.put("spanId", null);
-        entry.put("traceFlags", null);
-        entry.put("attributes", attrs);
-
-        try {
-            out.println(OBJECT_MAPPER.writeValueAsString(entry));
-        } catch (JsonProcessingException ignored) {
-            out.println("{\"body\":\"db.import.completed\",\"import.count\":" + count + "}");
-        }
     }
 }

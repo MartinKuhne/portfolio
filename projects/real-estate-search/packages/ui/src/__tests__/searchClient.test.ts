@@ -324,4 +324,47 @@ describe('fetchSearchListings (searchClient)', () => {
     expect(invalidLog.severityText).toBe('ERROR');
     expect(invalidLog.attributes['http.response.status_code']).toBe(502);
   });
+
+  it.each([
+    { backend: 'go' as const, expectedEndpoint: '/api/go/graphql' },
+    { backend: 'java' as const, expectedEndpoint: '/api/java/graphql' },
+  ])('routes requests to %s backend endpoint with W3C traceparent and span metadata', async ({ backend, expectedEndpoint }) => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: {
+          searchListings: {
+            __typename: 'SearchListingsSuccess',
+            listings: [],
+            pagination: { page: 1, pageSize: 10, totalResults: 0, totalPages: 0 },
+          },
+        },
+      }),
+    });
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
+
+    const res = await fetchSearchListings({ city: 'Austin', page: 1, pageSize: 10 }, undefined, {
+      backend,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(mockFetch).toHaveBeenCalledWith(
+      expectedEndpoint,
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'Content-Type': 'application/json',
+          traceparent: expect.stringMatching(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/),
+        }),
+      })
+    );
+
+    const spans = memoryExporter.getFinishedSpans();
+    const httpSpan = spans.find((s) => s.name === `HTTP POST ${expectedEndpoint}`);
+    const uiSpan = spans.find((s) => s.name === 'ui.searchListings');
+    expect(httpSpan?.attributes['api.backend']).toBe(backend);
+    expect(httpSpan?.attributes['url.path']).toBe(expectedEndpoint);
+    expect(uiSpan?.attributes['api.backend']).toBe(backend);
+  });
 });

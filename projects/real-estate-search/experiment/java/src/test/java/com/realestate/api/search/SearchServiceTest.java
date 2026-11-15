@@ -87,13 +87,24 @@ class SearchServiceTest {
     }
 
     @Test
-    void handlesNullInputAsDefaultSearch() {
-        SearchResult result = service.executeSearch(null);
+    void handlesEmptyInputAsDefaultSearch() {
+        SearchResult result = service.executeSearch(RawSearchInput.empty());
 
         assertThat(result).isInstanceOf(SearchResult.Success.class);
         SearchResult.Success success = (SearchResult.Success) result;
         assertThat(success.listings()).hasSize(10);
         assertThat(success.pagination().totalResults()).isEqualTo(24);
+    }
+
+    @Test
+    void rejectsNullInputAsNonObjectValidationError() {
+        SearchResult result = service.executeSearch(null);
+
+        assertThat(result).isInstanceOf(SearchResult.Failure.class);
+        SearchResult.Failure failure = (SearchResult.Failure) result;
+        assertThat(failure.error().code()).isEqualTo(SearchErrorCode.VALIDATION_ERROR);
+        assertThat(failure.error().message()).isEqualTo("Search input must be an object.");
+        assertThat(failure.error().field()).isNull();
     }
 
     @Test

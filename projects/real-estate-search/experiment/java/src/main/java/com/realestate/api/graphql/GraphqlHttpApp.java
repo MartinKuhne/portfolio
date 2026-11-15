@@ -9,23 +9,35 @@ import graphql.ExecutionInput;
 import graphql.ExecutionResult;
 import graphql.GraphQL;
 import io.javalin.Javalin;
+import io.javalin.http.BadRequestResponse;
+import io.javalin.http.ContentTooLargeResponse;
 import io.javalin.http.Context;
+import io.javalin.http.HttpResponseException;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.logs.Severity;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.context.Scope;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import org.eclipse.jetty.server.AbstractConnector;
+import org.eclipse.jetty.server.Connector;
 
 /**
  * Javalin HTTP server exposing {@code /graphql} with CORS, W3C TraceContext propagation,
  * OpenTelemetry {@code SERVER} spans, and GraphQL-over-HTTP status semantics.
  */
 public final class GraphqlHttpApp {
+
+    public static final int MAX_REQUEST_BODY_BYTES = 1024 * 1024;
+    public static final long HTTP_IDLE_TIMEOUT_MS = 30_000L;
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
@@ -56,11 +68,31 @@ public final class GraphqlHttpApp {
     private Javalin createJavalin() {
         Javalin app = Javalin.create(config -> {
             config.showJavalinBanner = false;
+            config.http.maxRequestSize = MAX_REQUEST_BODY_BYTES;
+            config.http.asyncTimeout = HTTP_IDLE_TIMEOUT_MS;
+            config.jetty.modifyHttpConfiguration(httpConfig -> httpConfig.setIdleTimeout(HTTP_IDLE_TIMEOUT_MS));
+            config.jetty.modifyServer(server -> applyConnectorIdleTimeout(server.getConnectors()));
         });
+        app.events(events -> events.serverStarting(() -> {
+            if (app.jettyServer() != null && app.jettyServer().server() != null) {
+                applyConnectorIdleTimeout(app.jettyServer().server().getConnectors());
+            }
+        }));
         app.options("/graphql", ctx -> handleTracedRequest(ctx, HttpAction.OPTIONS));
         app.post("/graphql", ctx -> handleTracedRequest(ctx, HttpAction.POST));
         app.get("/graphql", ctx -> handleTracedRequest(ctx, HttpAction.GET));
         return app;
+    }
+
+    private static void applyConnectorIdleTimeout(Connector[] connectors) {
+        if (connectors == null) {
+            return;
+        }
+        for (Connector connector : connectors) {
+            if (connector instanceof AbstractConnector abstractConnector) {
+                abstractConnector.setIdleTimeout(HTTP_IDLE_TIMEOUT_MS);
+            }
+        }
     }
 
     public Javalin javalin() {
@@ -113,6 +145,33 @@ public final class GraphqlHttpApp {
 
             int finalStatus = ctx.status().getCode();
             recordCompletionTelemetry(serverSpan, reqCtx, method, path, finalStatus);
+        } catch (HttpResponseException err) {
+            int status = err.getStatus();
+            if (status >= 500) {
+                serverSpan.recordException(err);
+            }
+            recordCompletionTelemetry(serverSpan, reqCtx, method, path, status);
+            String msg = status >= 500
+                ? "An unexpected internal error occurred."
+                : (err.getMessage() != null && !err.getMessage().isBlank() ? err.getMessage() : "HTTP " + status);
+            String code = switch (status) {
+                case 413 -> "PAYLOAD_TOO_LARGE";
+                case 400 -> "BAD_USER_INPUT";
+                default -> status >= 500 ? "INTERNAL_SERVER_ERROR" : "HTTP_" + status;
+            };
+            writeJson(
+                ctx,
+                status,
+                Map.of(
+                    "errors",
+                    List.of(
+                        Map.of(
+                            "message", msg,
+                            "extensions", Map.of("code", code)
+                        )
+                    )
+                )
+            );
         } catch (RuntimeException err) {
             serverSpan.recordException(err);
             String msg = err.getMessage() != null ? err.getMessage() : err.getClass().getSimpleName();
@@ -187,7 +246,7 @@ public final class GraphqlHttpApp {
     }
 
     private void executeGraphqlPost(Context ctx, RequestTelemetryContext reqCtx) {
-        String rawBody = ctx.body();
+        String rawBody = readBoundedBody(ctx, MAX_REQUEST_BODY_BYTES);
         if (rawBody == null || rawBody.isBlank()) {
             writeBadRequestError(ctx, "Request body must be a valid JSON object.");
             return;
@@ -287,6 +346,35 @@ public final class GraphqlHttpApp {
             : 200;
 
         writeJson(ctx, httpStatus, spec);
+    }
+
+    private static String readBoundedBody(Context ctx, int maxBytes) {
+        long contentLength = ctx.req().getContentLengthLong();
+        if (contentLength > maxBytes) {
+            throw new ContentTooLargeResponse("Request body exceeds maximum allowed size of " + maxBytes + " bytes.");
+        }
+        try (InputStream in = ctx.bodyInputStream()) {
+            ByteArrayOutputStream bufferOut = new ByteArrayOutputStream(
+                contentLength > 0 ? (int) Math.min(contentLength, maxBytes) : 4096
+            );
+            byte[] chunk = new byte[8192];
+            int totalRead = 0;
+            int read;
+            while ((read = in.read(chunk)) != -1) {
+                if (read > maxBytes - totalRead) {
+                    throw new ContentTooLargeResponse(
+                        "Request body exceeds maximum allowed size of " + maxBytes + " bytes."
+                    );
+                }
+                bufferOut.write(chunk, 0, read);
+                totalRead += read;
+            }
+            return bufferOut.toString(StandardCharsets.UTF_8);
+        } catch (ContentTooLargeResponse ex) {
+            throw ex;
+        } catch (IOException ex) {
+            throw new BadRequestResponse("Failed to read request body.");
+        }
     }
 
     private static Map<String, Object> castStringMap(Map<?, ?> source) {

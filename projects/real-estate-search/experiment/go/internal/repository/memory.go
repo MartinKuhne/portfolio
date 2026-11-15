@@ -5,11 +5,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"real-estate-search/internal/domain"
 	"real-estate-search/internal/scoring"
+	"real-estate-search/internal/telemetry"
 )
 
 // MemoryRepository is an in-memory thread-safe implementation of Repository.
@@ -26,10 +29,10 @@ func NewMemoryRepository() *MemoryRepository {
 }
 
 func matchesFilter(listing domain.Listing, input domain.ValidatedSearchInput) bool {
-	if input.MinPrice != nil && listing.Price < *input.MinPrice {
+	if input.MinPrice != nil && float64(listing.Price) < *input.MinPrice {
 		return false
 	}
-	if input.MaxPrice != nil && listing.Price > *input.MaxPrice {
+	if input.MaxPrice != nil && float64(listing.Price) > *input.MaxPrice {
 		return false
 	}
 	if input.MinBedrooms != nil && listing.Bedrooms < *input.MinBedrooms {
@@ -48,7 +51,18 @@ func matchesFilter(listing domain.Listing, input domain.ValidatedSearchInput) bo
 	return true
 }
 
-func (m *MemoryRepository) CountMatchingListings(_ context.Context, input domain.ValidatedSearchInput) (int, error) {
+func (m *MemoryRepository) CountMatchingListings(ctx context.Context, input domain.ValidatedSearchInput) (int, error) {
+	tracer := telemetry.GetTracer()
+	_, span := tracer.Start(ctx, "search.db.count",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system", "postgresql"),
+			attribute.String("db.operation.name", "SELECT"),
+			attribute.String("db.collection.name", "listings"),
+		),
+	)
+	defer span.End()
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -58,10 +72,24 @@ func (m *MemoryRepository) CountMatchingListings(_ context.Context, input domain
 			count++
 		}
 	}
+	span.SetAttributes(attribute.Int("search.totalResults", count))
 	return count, nil
 }
 
-func (m *MemoryRepository) FetchListingPage(_ context.Context, input domain.ValidatedSearchInput, offset int) ([]domain.Listing, error) {
+func (m *MemoryRepository) FetchListingPage(ctx context.Context, input domain.ValidatedSearchInput, offset int) ([]domain.Listing, error) {
+	tracer := telemetry.GetTracer()
+	_, span := tracer.Start(ctx, "search.db.query",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system", "postgresql"),
+			attribute.String("db.operation.name", "SELECT"),
+			attribute.String("db.collection.name", "listings"),
+			attribute.Int("search.page", input.Page),
+			attribute.Int("search.pageSize", input.PageSize),
+		),
+	)
+	defer span.End()
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -86,8 +114,8 @@ func (m *MemoryRepository) FetchListingPage(_ context.Context, input domain.Vali
 			return a.RelevanceScore > b.RelevanceScore
 		}
 
-		tA, _ := time.Parse(time.RFC3339, a.ListedDate)
-		tB, _ := time.Parse(time.RFC3339, b.ListedDate)
+		tA, _ := scoring.ParseISODate(a.ListedDate)
+		tB, _ := scoring.ParseISODate(b.ListedDate)
 		if !tA.Equal(tB) {
 			return tA.After(tB)
 		}
@@ -120,6 +148,7 @@ func (m *MemoryRepository) FetchListingPage(_ context.Context, input domain.Vali
 	})
 
 	if offset >= len(matched) {
+		span.SetAttributes(attribute.Int("search.returnedCount", 0))
 		return []domain.Listing{}, nil
 	}
 
@@ -130,16 +159,19 @@ func (m *MemoryRepository) FetchListingPage(_ context.Context, input domain.Vali
 
 	result := make([]domain.Listing, end-offset)
 	copy(result, matched[offset:end])
+	span.SetAttributes(attribute.Int("search.returnedCount", len(result)))
 	return result, nil
 }
 
-func (m *MemoryRepository) InsertOrBackfillListings(_ context.Context, records []domain.Listing) (int, error) {
+// InsertListingsIdempotently inserts listings by (id, source), skipping rows that already exist.
+func (m *MemoryRepository) InsertListingsIdempotently(_ context.Context, records []domain.Listing) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	count := 0
+	inserted := 0
 	for _, r := range records {
 		rec := r
+		rec.ID = strings.TrimSpace(rec.ID)
 		if rec.InternalID == nil || *rec.InternalID == "" {
 			u := uuid.NewString()
 			rec.InternalID = &u
@@ -149,50 +181,27 @@ func (m *MemoryRepository) InsertOrBackfillListings(_ context.Context, records [
 			rec.Source = &src
 		}
 
-		foundIndex := -1
-		for i, existing := range m.listings {
+		newSource := *rec.Source
+		exists := false
+		for _, existing := range m.listings {
 			existingSource := "SEED"
-			if existing.Source != nil {
+			if existing.Source != nil && *existing.Source != "" {
 				existingSource = *existing.Source
 			}
-			newSource := "SEED"
-			if rec.Source != nil {
-				newSource = *rec.Source
-			}
-
 			if existing.ID == rec.ID && existingSource == newSource {
-				foundIndex = i
+				exists = true
 				break
 			}
 		}
 
-		if foundIndex >= 0 {
-			// Backfill only nil fields
-			existing := &m.listings[foundIndex]
-			if existing.State == nil && rec.State != nil {
-				existing.State = rec.State
-			}
-			if existing.Zip == nil && rec.Zip != nil {
-				existing.Zip = rec.Zip
-			}
-			if existing.Bathrooms == nil && rec.Bathrooms != nil {
-				existing.Bathrooms = rec.Bathrooms
-			}
-			if existing.Sqft == nil && rec.Sqft != nil {
-				existing.Sqft = rec.Sqft
-			}
-			if existing.Latitude == nil && rec.Latitude != nil {
-				existing.Latitude = rec.Latitude
-			}
-			if existing.Longitude == nil && rec.Longitude != nil {
-				existing.Longitude = rec.Longitude
-			}
-		} else {
-			m.listings = append(m.listings, rec)
+		if exists {
+			continue
 		}
-		count++
+
+		m.listings = append(m.listings, rec)
+		inserted++
 	}
-	return count, nil
+	return inserted, nil
 }
 
 func (m *MemoryRepository) EnsureSchema(_ context.Context) error {

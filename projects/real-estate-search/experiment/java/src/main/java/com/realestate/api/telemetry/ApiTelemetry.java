@@ -1,6 +1,5 @@
 package com.realestate.api.telemetry;
 
-import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.common.AttributesBuilder;
@@ -131,8 +130,6 @@ public final class ApiTelemetry implements AutoCloseable {
                 return globalInstance;
             }
             ApiTelemetry created = create(config);
-            GlobalOpenTelemetry.resetForTest();
-            GlobalOpenTelemetry.set(created.openTelemetry);
             globalInstance = created;
             return created;
         }
@@ -156,11 +153,7 @@ public final class ApiTelemetry implements AutoCloseable {
             }
             ApiTelemetry toClose = globalInstance;
             globalInstance = null;
-            try {
-                toClose.close();
-            } finally {
-                GlobalOpenTelemetry.resetForTest();
-            }
+            toClose.close();
         }
     }
 

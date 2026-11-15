@@ -51,10 +51,10 @@ func TestValidateSearchInput_ValidInputs(t *testing.T) {
 		t.Fatalf("expected OK true, got error: %v", res.Error)
 	}
 	if *res.Value.MinPrice != 200000 {
-		t.Errorf("expected minPrice 200000, got %d", *res.Value.MinPrice)
+		t.Errorf("expected minPrice 200000, got %f", *res.Value.MinPrice)
 	}
 	if *res.Value.MaxPrice != 500000 {
-		t.Errorf("expected maxPrice 500000, got %d", *res.Value.MaxPrice)
+		t.Errorf("expected maxPrice 500000, got %f", *res.Value.MaxPrice)
 	}
 	if *res.Value.MinBedrooms != 2 {
 		t.Errorf("expected minBedrooms 2, got %d", *res.Value.MinBedrooms)
@@ -297,5 +297,30 @@ func TestValidateSearchInput_StringBoundsAndNullBytes(t *testing.T) {
 	}
 	if res.Value.City != nil || res.Value.Keyword != nil {
 		t.Errorf("expected nil city and keyword, got: city=%v, kw=%v", res.Value.City, res.Value.Keyword)
+	}
+}
+
+func TestValidateSearchInput_DecimalPrices(t *testing.T) {
+	res := validation.ValidateSearchInput(domain.RawSearchInput{
+		MinPrice: 450000.5,
+		MaxPrice: "550000.75",
+	})
+	if !res.OK {
+		t.Fatalf("expected decimal prices to be valid, got error: %+v", res.Error)
+	}
+	if res.Value.MinPrice == nil || *res.Value.MinPrice != 450000.5 {
+		t.Errorf("expected minPrice 450000.5, got %v", res.Value.MinPrice)
+	}
+	if res.Value.MaxPrice == nil || *res.Value.MaxPrice != 550000.75 {
+		t.Errorf("expected maxPrice 550000.75, got %v", res.Value.MaxPrice)
+	}
+
+	// Fractional difference where minPrice > maxPrice must be caught
+	resOrder := validation.ValidateSearchInput(domain.RawSearchInput{
+		MinPrice: 450000.6,
+		MaxPrice: 450000.5,
+	})
+	if resOrder.OK || resOrder.Error == nil || *resOrder.Error.Field != "minPrice" {
+		t.Errorf("expected minPrice > maxPrice error for 450000.6 > 450000.5, got: %+v", resOrder)
 	}
 }

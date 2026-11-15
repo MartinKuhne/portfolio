@@ -109,7 +109,12 @@ class PostgresListingRepositoryTest {
             case "getInt" -> 7;
             default -> defaultValue(method);
         });
+        List<Integer> timeouts = new ArrayList<>();
         PreparedStatement ps = proxy(PreparedStatement.class, (method, args) -> {
+            if ("setQueryTimeout".equals(method)) {
+                timeouts.add((Integer) args[0]);
+                return null;
+            }
             if ("setObject".equals(method)) {
                 boundParams.put((Integer) args[0], args[1]);
                 return null;
@@ -133,6 +138,7 @@ class PostgresListingRepositoryTest {
         int count = repo.countMatchingListings(criteria);
 
         assertThat(count).isEqualTo(7);
+        assertThat(timeouts).containsExactly(PostgresListingRepository.QUERY_TIMEOUT_SECONDS);
         assertThat(capturedSql.get(0)).contains("SELECT COUNT(*)::int FROM listings WHERE");
         assertThat(boundParams).containsEntry(1, BigDecimal.valueOf(300000.0));
         assertThat(boundParams).containsEntry(2, 2);
@@ -407,6 +413,56 @@ class PostgresListingRepositoryTest {
 
         assertThat(rolledBack).isTrue();
         assertThat(autoCommitHistory).containsExactly(false, true);
+    }
+
+    @Test
+    void insertListingsIdempotentlyHandlesSuccessNoInfoAndExecuteFailed() {
+        NewListing listing = new NewListing(
+            "A1", "MLS_A", "123 Main St", "Springfield", "VA", "22150",
+            450000, 2, 1.5, 980, 38.7893, -77.1873, "active", "Condo", "2026-08-29"
+        );
+
+        AtomicBoolean committed = new AtomicBoolean(false);
+        PreparedStatement noInfoPs = proxy(PreparedStatement.class, (method, args) -> {
+            if ("executeBatch".equals(method)) {
+                return new int[] { Statement.SUCCESS_NO_INFO, 0 };
+            }
+            return defaultValue(method);
+        });
+        Connection noInfoConn = proxy(Connection.class, (method, args) -> switch (method) {
+            case "getAutoCommit" -> true;
+            case "prepareStatement" -> noInfoPs;
+            case "commit" -> {
+                committed.set(true);
+                yield null;
+            }
+            default -> defaultValue(method);
+        });
+        PostgresListingRepository noInfoRepo = new PostgresListingRepository(singleConnectionDataSource(noInfoConn), tracer);
+        assertThat(noInfoRepo.insertListingsIdempotently(List.of(listing, listing))).isEqualTo(1);
+        assertThat(committed).isTrue();
+
+        AtomicBoolean rolledBack = new AtomicBoolean(false);
+        PreparedStatement failedPs = proxy(PreparedStatement.class, (method, args) -> {
+            if ("executeBatch".equals(method)) {
+                return new int[] { Statement.EXECUTE_FAILED };
+            }
+            return defaultValue(method);
+        });
+        Connection failedConn = proxy(Connection.class, (method, args) -> switch (method) {
+            case "getAutoCommit" -> true;
+            case "prepareStatement" -> failedPs;
+            case "rollback" -> {
+                rolledBack.set(true);
+                yield null;
+            }
+            default -> defaultValue(method);
+        });
+        PostgresListingRepository failedRepo = new PostgresListingRepository(singleConnectionDataSource(failedConn), tracer);
+        assertThatThrownBy(() -> failedRepo.insertListingsIdempotently(List.of(listing)))
+            .isInstanceOf(PersistenceException.class)
+            .hasMessageContaining("EXECUTE_FAILED");
+        assertThat(rolledBack).isTrue();
     }
 
     interface CloseableDataSource extends DataSource, AutoCloseable {

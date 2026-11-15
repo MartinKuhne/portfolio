@@ -26,8 +26,11 @@ class DefaultRelevanceScorerTest {
         assertThat(close).isGreaterThan(far);
         assertThat(far).isGreaterThanOrEqualTo(0.0);
 
-        assertThat(DefaultRelevanceScorer.computeBudgetProximityScore(0, 500_000)).isEqualTo(0.0);
-        assertThat(DefaultRelevanceScorer.computeBudgetProximityScore(1_500_000, 500_000)).isEqualTo(0.0);
+        assertThat(DefaultRelevanceScorer.computeBudgetProximityScore(0, 500_000)).isEqualTo(0.5);
+        double triple = DefaultRelevanceScorer.computeBudgetProximityScore(1_500_000, 500_000);
+        assertThat(triple).isCloseTo(1.0 / 3.0, org.assertj.core.data.Offset.offset(1e-9));
+        assertThat(DefaultRelevanceScorer.computeBudgetProximityScore(350_000, 100_000))
+            .isGreaterThan(DefaultRelevanceScorer.computeBudgetProximityScore(990_000, 100_000));
     }
 
     @Test
@@ -65,6 +68,15 @@ class DefaultRelevanceScorerTest {
         assertThat(
             DefaultRelevanceScorer.computeRecencyScore("2026-11-01T00:00:00+00:00", "2026-11-01T00:00:00.000Z")
         ).isEqualTo(1.0);
+        assertThat(
+            DefaultRelevanceScorer.computeRecencyScore("2026-11-01", "2026-11-01")
+        ).isEqualTo(1.0);
+        assertThat(
+            scorer.computeScore(500_000, "2026-07-24", null, "2026-11-01")
+        ).isEqualTo(0.73);
+        assertThat(
+            scorer.computeScore(500_000, "2026-10-25", 500_000.0, "2026-11-01")
+        ).isEqualTo(scorer.computeScore(500_000, "2026-10-25T00:00:00.000Z", 500_000.0, "2026-11-01T00:00:00.000Z"));
     }
 
     @Test
@@ -97,7 +109,7 @@ class DefaultRelevanceScorerTest {
             500_000.0,
             "2026-11-01T00:00:00.000Z"
         );
-        assertThat(mixed).isEqualTo(0.7);
+        assertThat(mixed).isEqualTo(0.8);
 
         // 100 days prior to 2026-11-01 -> 1 - 100/365 = 0.726027... -> 0.73
         double rounded = scorer.computeScore(
@@ -108,7 +120,7 @@ class DefaultRelevanceScorerTest {
         );
         assertThat(rounded).isEqualTo(0.73);
 
-        // Future date & extreme price clamped to [0.00, 1.00]
+        // Future date & extreme price bounded to [0.00, 1.00]
         assertThat(
             scorer.computeScore(500_000, "2027-01-01T00:00:00.000Z", 500_000.0)
         ).isEqualTo(1.0);
@@ -116,7 +128,7 @@ class DefaultRelevanceScorerTest {
             scorer.computeScore(500_000, "2026-11-01T00:00:00.000Z", 500_000.0, null)
         ).isEqualTo(1.0);
         assertThat(
-            scorer.computeScore(5_000_000, "2020-01-01T00:00:00.000Z", 100_000.0)
+            scorer.computeScore(100_000_000, "2020-01-01T00:00:00.000Z", 100_000.0)
         ).isEqualTo(0.0);
     }
 }

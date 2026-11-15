@@ -25,8 +25,8 @@ type RawSearchInput struct {
 
 // ValidatedSearchInput holds strictly typed and bounded search criteria.
 type ValidatedSearchInput struct {
-	MinPrice     *int
-	MaxPrice     *int
+	MinPrice     *float64
+	MaxPrice     *float64
 	MinBedrooms  *int
 	City         *string
 	Keyword      *string

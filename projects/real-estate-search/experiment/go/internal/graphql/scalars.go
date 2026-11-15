@@ -74,13 +74,16 @@ func parseLiteralNode(node ast.Value, depth int) (any, error) {
 	}
 }
 
-// ParseLiteral parses AST literal values with depth and prototype security checks.
+// ParseLiteralChecked parses AST literal values and returns an error on depth or key violations.
+func ParseLiteralChecked(astNode ast.Value) (any, error) {
+	return parseLiteralNode(astNode, 0)
+}
+
+// ParseLiteral parses AST literal values without panicking; returns nil on invalid literals.
 func ParseLiteral(astNode ast.Value) any {
 	val, err := parseLiteralNode(astNode, 0)
 	if err != nil {
-		// In graphql-go, returning nil from ParseLiteral indicates a parse error,
-		// or panicking with error produces a GraphQL validation error.
-		panic(err)
+		return nil
 	}
 	return val
 }

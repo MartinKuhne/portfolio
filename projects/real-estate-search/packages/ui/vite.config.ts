@@ -38,6 +38,14 @@ export default defineConfig({
   server: {
     proxy: {
       '/graphql': 'http://localhost:4000',
+      '/api/go/graphql': {
+        target: 'http://localhost:4001',
+        rewrite: (reqPath) => reqPath.replace(/^\/api\/go/, ''),
+      },
+      '/api/java/graphql': {
+        target: 'http://localhost:4002',
+        rewrite: (reqPath) => reqPath.replace(/^\/api\/java/, ''),
+      },
       '/v1/traces': 'http://localhost:4318',
     },
   },

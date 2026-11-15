@@ -7,6 +7,8 @@ import graphql.GraphQLError;
 import graphql.execution.DataFetcherExceptionHandler;
 import graphql.execution.DataFetcherExceptionHandlerParameters;
 import graphql.execution.DataFetcherExceptionHandlerResult;
+import graphql.schema.CoercingParseLiteralException;
+import graphql.schema.CoercingParseValueException;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -71,20 +73,29 @@ public final class GraphqlPayloads {
             DataFetcherExceptionHandlerParameters handlerParameters
         ) {
             Throwable exception = handlerParameters.getException();
+            ErrorType errorType = ErrorType.DataFetchingException;
+            String errorCode = "INTERNAL_SERVER_ERROR";
             String sanitizedMessage;
             if (exception instanceof GraphqlInternalException) {
                 sanitizedMessage = exception.getMessage();
+            } else if (exception instanceof CoercingParseLiteralException
+                || exception instanceof CoercingParseValueException) {
+                errorType = ErrorType.ValidationError;
+                errorCode = "BAD_USER_INPUT";
+                sanitizedMessage = exception.getMessage() != null
+                    ? exception.getMessage()
+                    : "Invalid scalar input.";
             } else {
                 System.err.println("Unexpected GraphQL data fetcher exception: " + exception.getMessage());
                 sanitizedMessage = "An unexpected internal error occurred.";
             }
 
             GraphQLError error = GraphQLError.newError()
-                .errorType(ErrorType.DataFetchingException)
+                .errorType(errorType)
                 .message(sanitizedMessage)
                 .path(handlerParameters.getPath())
                 .location(handlerParameters.getSourceLocation())
-                .extensions(Map.of("code", "INTERNAL_SERVER_ERROR"))
+                .extensions(Map.of("code", errorCode))
                 .build();
 
             return CompletableFuture.completedFuture(

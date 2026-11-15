@@ -3,7 +3,9 @@ package com.realestate.api.scoring;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
 
 /**
@@ -40,14 +42,14 @@ public final class DefaultRelevanceScorer implements RelevanceScorer {
     }
 
     /**
-     * Computes budget proximity in {@code [0.0, 1.0]} as {@code clamp(1 - |price - targetBudget| / targetBudget, 0, 1)}.
+     * Computes strictly decreasing budget proximity in {@code (0.0, 1.0]} as {@code 1 / (1 + |price - targetBudget| / targetBudget)}.
      */
     public static double computeBudgetProximityScore(double price, double targetBudget) {
         if (!Double.isFinite(price) || !Double.isFinite(targetBudget) || targetBudget <= 0 || price < 0) {
             return 0.0;
         }
         double diff = Math.abs(price - targetBudget);
-        return clamp(1.0 - diff / targetBudget, 0.0, 1.0);
+        return 1.0 / (1.0 + diff / targetBudget);
     }
 
     /**
@@ -67,13 +69,18 @@ public final class DefaultRelevanceScorer implements RelevanceScorer {
         if (iso == null || iso.isBlank()) {
             return null;
         }
+        String trimmed = iso.trim();
         try {
-            return Instant.parse(iso.trim()).toEpochMilli();
+            return Instant.parse(trimmed).toEpochMilli();
         } catch (DateTimeParseException ignored) {
             try {
-                return OffsetDateTime.parse(iso.trim()).toInstant().toEpochMilli();
-            } catch (DateTimeParseException ignoredAgain) {
-                return null;
+                return OffsetDateTime.parse(trimmed).toInstant().toEpochMilli();
+            } catch (DateTimeParseException ignoredOffset) {
+                try {
+                    return LocalDate.parse(trimmed).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();
+                } catch (DateTimeParseException ignoredDate) {
+                    return null;
+                }
             }
         }
     }

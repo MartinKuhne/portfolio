@@ -14,7 +14,7 @@ export function computeBudgetProximityScore(price: number, targetBudget: number)
     return 0;
   }
   const diff = Math.abs(price - targetBudget);
-  return clamp(1 - diff / targetBudget, 0, 1);
+  return 1 / (1 + diff / targetBudget);
 }
 
 export function computeRecencyScore(

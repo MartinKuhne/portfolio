@@ -15,7 +15,8 @@ var isoLayouts = []string{
 	"2006-01-02",
 }
 
-func parseISODate(iso string) (time.Time, bool) {
+// ParseISODate parses supported ISO-8601 date strings to UTC time.
+func ParseISODate(iso string) (time.Time, bool) {
 	for _, layout := range isoLayouts {
 		if t, err := time.Parse(layout, iso); err == nil {
 			return t.UTC(), true
@@ -28,7 +29,7 @@ func clamp(value, min, max float64) float64 {
 	return math.Min(math.Max(value, min), max)
 }
 
-// ComputeBudgetProximityScore computes budget proximity normalized to [0, 1].
+// ComputeBudgetProximityScore computes strictly decreasing budget proximity in (0, 1].
 func ComputeBudgetProximityScore(price, targetBudget float64) float64 {
 	if math.IsNaN(price) || math.IsInf(price, 0) ||
 		math.IsNaN(targetBudget) || math.IsInf(targetBudget, 0) ||
@@ -36,13 +37,13 @@ func ComputeBudgetProximityScore(price, targetBudget float64) float64 {
 		return 0.0
 	}
 	diff := math.Abs(price - targetBudget)
-	return clamp(1.0-diff/targetBudget, 0.0, 1.0)
+	return 1.0 / (1.0 + diff/targetBudget)
 }
 
 // ComputeRecencyScore computes recency score normalized to [0, 1].
 func ComputeRecencyScore(listedDateIso, referenceDateIso string) float64 {
-	refTime, okRef := parseISODate(referenceDateIso)
-	listedTime, okList := parseISODate(listedDateIso)
+	refTime, okRef := ParseISODate(referenceDateIso)
+	listedTime, okList := ParseISODate(listedDateIso)
 	if !okRef || !okList {
 		return 0.0
 	}

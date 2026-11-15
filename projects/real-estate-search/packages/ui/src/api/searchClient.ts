@@ -147,16 +147,61 @@ function mapGraphqlResultToSearchResponse(
   }
 }
 
+export type ApiBackendId = 'node' | 'go' | 'java';
+
+export interface ApiBackendOption {
+  id: ApiBackendId;
+  label: string;
+  endpoint: string;
+  serviceName: string;
+}
+
+export const API_BACKENDS: readonly ApiBackendOption[] = [
+  {
+    id: 'node',
+    label: 'TypeScript (Node.js)',
+    endpoint: '/graphql',
+    serviceName: 'real-estate-api',
+  },
+  {
+    id: 'go',
+    label: 'Go',
+    endpoint: '/api/go/graphql',
+    serviceName: 'real-estate-api-go',
+  },
+  {
+    id: 'java',
+    label: 'Java',
+    endpoint: '/api/java/graphql',
+    serviceName: 'real-estate-api-java',
+  },
+] as const;
+
+export interface SearchRequestOptions {
+  backend?: ApiBackendId;
+  endpoint?: string;
+}
+
+/** Resolves metadata for the selected API backend, defaulting to TypeScript (Node.js). */
+export function getApiBackendOption(backend?: ApiBackendId): ApiBackendOption {
+  return API_BACKENDS.find((option) => option.id === backend) ?? API_BACKENDS[0];
+}
+
 export async function fetchSearchListings(
   rawInput: RawSearchInput,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: SearchRequestOptions
 ): Promise<SearchResponse> {
+  const backend = getApiBackendOption(options?.backend);
+  const endpoint = options?.endpoint ?? backend.endpoint;
   const tracer = getTracer();
   const uiSpan = tracer.startSpan('ui.searchListings', {
     kind: SpanKind.INTERNAL,
     attributes: {
       'search.page': String(rawInput.page ?? 1),
       'search.pageSize': String(rawInput.pageSize ?? 10),
+      'api.backend': backend.id,
+      'url.path': endpoint,
     },
   });
   const uiCtx = trace.setSpan(context.active(), uiSpan);
@@ -170,6 +215,7 @@ export async function fetchSearchListings(
       'WARN',
       'ui.search.validation_failed',
       {
+        'api.backend': backend.id,
         'error.code': validation.error.code,
         'error.field': validation.error.field ?? '',
       },
@@ -180,12 +226,13 @@ export async function fetchSearchListings(
   }
 
   const httpSpan = tracer.startSpan(
-    'HTTP POST /graphql',
+    `HTTP POST ${endpoint}`,
     {
       kind: SpanKind.CLIENT,
       attributes: {
         'http.request.method': 'POST',
-        'url.path': '/graphql',
+        'url.path': endpoint,
+        'api.backend': backend.id,
       },
     },
     uiCtx
@@ -200,13 +247,14 @@ export async function fetchSearchListings(
       'INFO',
       'ui.search.request_started',
       {
+        'api.backend': backend.id,
         'http.request.method': 'POST',
-        'url.path': '/graphql',
+        'url.path': endpoint,
       },
       httpCtx
     );
 
-    const response = await fetch('/graphql', {
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers,
       body: JSON.stringify({

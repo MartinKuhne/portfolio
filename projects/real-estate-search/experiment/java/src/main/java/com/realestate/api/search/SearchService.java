@@ -42,7 +42,6 @@ public class SearchService {
      * Executes a validated, paginated property search with OpenTelemetry instrumentation.
      */
     public SearchResult executeSearch(RawSearchInput rawInput) {
-        RawSearchInput safeInput = rawInput != null ? rawInput : RawSearchInput.empty();
         return telemetry.withSpan("search.execute", SpanKind.INTERNAL, Attributes.empty(), executeSpan -> {
             try {
                 telemetry.log(
@@ -56,7 +55,7 @@ public class SearchService {
                         .build()
                 );
 
-                ValidationOutcome validation = validateWithSpan(safeInput);
+                ValidationOutcome validation = validateWithSpan(rawInput);
                 if (validation instanceof ValidationOutcome.Invalid invalid) {
                     return recordFailure(
                         executeSpan,

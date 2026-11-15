@@ -43,9 +43,8 @@ func NewPostgresRepository(ctx context.Context, connectionString string) (*Postg
 	return repo, nil
 }
 
-// EnsureSchema creates tables, indexes, and applies legacy migrations matching ADR-009.
-func (p *PostgresRepository) EnsureSchema(ctx context.Context) error {
-	ddl := `
+// EnsureSchemaDDL defines the ADR-009 idempotent schema DDL matching client.ts.
+const EnsureSchemaDDL = `
     CREATE TABLE IF NOT EXISTS listings (
       internal_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       id TEXT NOT NULL,
@@ -66,62 +65,6 @@ func (p *PostgresRepository) EnsureSchema(ctx context.Context) error {
       description TEXT NOT NULL
     );
 
-    DO $$
-    DECLARE
-      pk_name text;
-      pk_on_internal boolean := false;
-    BEGIN
-      ALTER TABLE listings ADD COLUMN IF NOT EXISTS internal_id UUID DEFAULT gen_random_uuid();
-      ALTER TABLE listings ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'SEED';
-      ALTER TABLE listings ADD COLUMN IF NOT EXISTS state TEXT;
-      ALTER TABLE listings ADD COLUMN IF NOT EXISTS zip TEXT;
-      ALTER TABLE listings ADD COLUMN IF NOT EXISTS bathrooms DOUBLE PRECISION;
-      ALTER TABLE listings ADD COLUMN IF NOT EXISTS sqft INTEGER;
-      ALTER TABLE listings ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
-      ALTER TABLE listings ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
-      ALTER TABLE listings ADD COLUMN IF NOT EXISTS location POINT;
-      ALTER TABLE listings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
-
-      UPDATE listings SET internal_id = gen_random_uuid() WHERE internal_id IS NULL;
-      ALTER TABLE listings ALTER COLUMN internal_id SET DEFAULT gen_random_uuid();
-      ALTER TABLE listings ALTER COLUMN internal_id SET NOT NULL;
-
-      SELECT c.conname,
-             (array_agg(a.attname::text ORDER BY k.ord) = ARRAY['internal_id'])
-      INTO pk_name, pk_on_internal
-      FROM pg_constraint c
-      JOIN pg_class t ON t.oid = c.conrelid
-      JOIN pg_namespace n ON n.oid = t.relnamespace
-      CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
-      JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
-      WHERE t.relname = 'listings'
-        AND n.nspname = current_schema()
-        AND c.contype = 'p'
-      GROUP BY c.conname;
-
-      IF pk_name IS NULL THEN
-        ALTER TABLE listings ADD PRIMARY KEY (internal_id);
-      ELSIF NOT pk_on_internal THEN
-        EXECUTE format('ALTER TABLE listings DROP CONSTRAINT %I', pk_name);
-        ALTER TABLE listings ADD PRIMARY KEY (internal_id);
-        UPDATE listings SET source = 'MLS_A' WHERE source = 'SEED' AND id LIKE 'A%';
-        UPDATE listings SET source = 'MLS_B' WHERE source = 'SEED' AND id LIKE 'B%';
-      END IF;
-
-      IF EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = current_schema()
-          AND table_name = 'listings'
-          AND column_name = 'listed_date'
-          AND data_type <> 'timestamp with time zone'
-      ) THEN
-        ALTER TABLE listings
-          ALTER COLUMN listed_date TYPE TIMESTAMPTZ
-          USING listed_date::timestamptz;
-      END IF;
-    END $$;
-
     CREATE UNIQUE INDEX IF NOT EXISTS listings_id_source_unique ON listings (id, source);
     CREATE INDEX IF NOT EXISTS listings_location_gist ON listings USING gist (location);
     CREATE INDEX IF NOT EXISTS listings_listed_date_desc ON listings (listed_date DESC);
@@ -138,7 +81,10 @@ func (p *PostgresRepository) EnsureSchema(ctx context.Context) error {
       END IF;
     END $$;
 	`
-	_, err := p.pool.Exec(ctx, ddl)
+
+// EnsureSchema creates tables and indexes matching ADR-009 and client.ts.
+func (p *PostgresRepository) EnsureSchema(ctx context.Context) error {
+	_, err := p.pool.Exec(ctx, EnsureSchemaDDL)
 	return err
 }
 
@@ -190,7 +136,7 @@ func (p *PostgresRepository) FetchListingPage(ctx context.Context, input domain.
 	}
 	defer rows.Close()
 
-	var listings []domain.Listing
+	listings := make([]domain.Listing, 0)
 	for rows.Next() {
 		var (
 			internalID     *uuid.UUID
@@ -290,18 +236,8 @@ func (p *PostgresRepository) FetchListingPage(ctx context.Context, input domain.
 	return listings, nil
 }
 
-func (p *PostgresRepository) InsertOrBackfillListings(ctx context.Context, records []domain.Listing) (int, error) {
-	if len(records) == 0 {
-		return 0, nil
-	}
-
-	tx, err := p.pool.Begin(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback(ctx)
-
-	upsertSQL := `
+// InsertListingsIdempotentlySQL is the idempotent INSERT statement matching client.ts.
+const InsertListingsIdempotentlySQL = `
     INSERT INTO listings (
       internal_id, id, source, address, city, state, zip, price, bedrooms,
       bathrooms, sqft, latitude, longitude, location, listed_date, status, description
@@ -313,68 +249,74 @@ func (p *PostgresRepository) InsertOrBackfillListings(ctx context.Context, recor
            ELSE NULL END,
       $14, COALESCE($15, 'active'), $16
     )
-    ON CONFLICT (id, source) DO UPDATE SET
-      state = COALESCE(listings.state, excluded.state),
-      zip = COALESCE(listings.zip, excluded.zip),
-      bathrooms = COALESCE(listings.bathrooms, excluded.bathrooms),
-      sqft = COALESCE(listings.sqft, excluded.sqft),
-      latitude = COALESCE(listings.latitude, excluded.latitude),
-      longitude = COALESCE(listings.longitude, excluded.longitude),
-      location = COALESCE(listings.location, excluded.location)
-    WHERE (listings.state IS NULL AND excluded.state IS NOT NULL)
-       OR (listings.zip IS NULL AND excluded.zip IS NOT NULL)
-       OR (listings.bathrooms IS NULL AND excluded.bathrooms IS NOT NULL)
-       OR (listings.sqft IS NULL AND excluded.sqft IS NOT NULL)
-       OR (listings.latitude IS NULL AND excluded.latitude IS NOT NULL)
-       OR (listings.longitude IS NULL AND excluded.longitude IS NOT NULL)
-       OR (listings.location IS NULL AND excluded.location IS NOT NULL)
-  `
+    ON CONFLICT (id, source) DO NOTHING
+`
+
+// BuildInsertListingArgs builds the ordered SQL parameter slice for InsertListingsIdempotentlySQL.
+func BuildInsertListingArgs(rec domain.Listing) []any {
+	var internalUUID *uuid.UUID
+	if rec.InternalID != nil && *rec.InternalID != "" {
+		if u, err := uuid.Parse(*rec.InternalID); err == nil {
+			internalUUID = &u
+		}
+	}
+
+	source := "SEED"
+	if rec.Source != nil && *rec.Source != "" {
+		source = *rec.Source
+	}
+
+	status := "active"
+	if rec.Status != nil && *rec.Status != "" {
+		status = *rec.Status
+	}
+
+	return []any{
+		internalUUID,
+		strings.TrimSpace(rec.ID),
+		source,
+		strings.TrimSpace(rec.Address),
+		strings.TrimSpace(rec.City),
+		rec.State,
+		rec.Zip,
+		rec.Price,
+		rec.Bedrooms,
+		rec.Bathrooms,
+		rec.Sqft,
+		rec.Latitude,
+		rec.Longitude,
+		rec.ListedDate,
+		status,
+		rec.Description,
+	}
+}
+
+// InsertListingsIdempotently inserts listing records by (id, source), skipping rows that already exist.
+func (p *PostgresRepository) InsertListingsIdempotently(ctx context.Context, records []domain.Listing) (int, error) {
+	if len(records) == 0 {
+		return 0, nil
+	}
+
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
 
 	batch := &pgx.Batch{}
 	for _, rec := range records {
-		var internalUUID *uuid.UUID
-		if rec.InternalID != nil && *rec.InternalID != "" {
-			if u, err := uuid.Parse(*rec.InternalID); err == nil {
-				internalUUID = &u
-			}
-		}
-
-		source := "SEED"
-		if rec.Source != nil && *rec.Source != "" {
-			source = *rec.Source
-		}
-
-		status := "active"
-		if rec.Status != nil && *rec.Status != "" {
-			status = *rec.Status
-		}
-
-		batch.Queue(upsertSQL,
-			internalUUID,
-			strings.TrimSpace(rec.ID),
-			source,
-			strings.TrimSpace(rec.Address),
-			strings.TrimSpace(rec.City),
-			rec.State,
-			rec.Zip,
-			rec.Price,
-			rec.Bedrooms,
-			rec.Bathrooms,
-			rec.Sqft,
-			rec.Latitude,
-			rec.Longitude,
-			rec.ListedDate,
-			status,
-			rec.Description,
-		)
+		batch.Queue(InsertListingsIdempotentlySQL, BuildInsertListingArgs(rec)...)
 	}
 
 	br := tx.SendBatch(ctx, batch)
+	inserted := 0
 	for i := 0; i < len(records); i++ {
-		if _, err := br.Exec(); err != nil {
+		tag, err := br.Exec()
+		if err != nil {
 			_ = br.Close()
 			return 0, err
 		}
+		inserted += int(tag.RowsAffected())
 	}
 	if err := br.Close(); err != nil {
 		return 0, err
@@ -384,7 +326,7 @@ func (p *PostgresRepository) InsertOrBackfillListings(ctx context.Context, recor
 		return 0, err
 	}
 
-	return len(records), nil
+	return inserted, nil
 }
 
 func (p *PostgresRepository) Close() error {

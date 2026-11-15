@@ -96,7 +96,7 @@ public final class JsonScalar {
         }
         if (ast instanceof VariableReference varRef) {
             if (variables != null && variables.containsKey(varRef.getName())) {
-                return validateRuntimeValue(variables.get(varRef.getName()), 0);
+                return validateRuntimeValue(variables.get(varRef.getName()), depth, true);
             }
             return null;
         }
@@ -104,28 +104,38 @@ public final class JsonScalar {
     }
 
     static Object validateRuntimeValue(Object input, int depth) {
+        return validateRuntimeValue(input, depth, false);
+    }
+
+    private static Object validateRuntimeValue(Object input, int depth, boolean fromLiteral) {
         if (depth > MAX_LITERAL_DEPTH) {
-            throw new CoercingParseValueException("Input literal nesting exceeds maximum allowed depth.");
+            throw inputException(fromLiteral, "Input literal nesting exceeds maximum allowed depth.");
         }
         if (input instanceof Map<?, ?> map) {
             Map<String, Object> sanitized = new LinkedHashMap<>();
             for (Map.Entry<?, ?> entry : map.entrySet()) {
                 String key = String.valueOf(entry.getKey());
                 if (FORBIDDEN_OBJECT_KEYS.contains(key)) {
-                    throw new CoercingParseValueException("Invalid input object key.");
+                    throw inputException(fromLiteral, "Invalid input object key.");
                 }
-                sanitized.put(key, validateRuntimeValue(entry.getValue(), depth + 1));
+                sanitized.put(key, validateRuntimeValue(entry.getValue(), depth + 1, fromLiteral));
             }
             return sanitized;
         }
         if (input instanceof List<?> list) {
             List<Object> sanitized = new ArrayList<>(list.size());
             for (Object item : list) {
-                sanitized.add(validateRuntimeValue(item, depth + 1));
+                sanitized.add(validateRuntimeValue(item, depth + 1, fromLiteral));
             }
             return sanitized;
         }
         return input;
+    }
+
+    private static RuntimeException inputException(boolean fromLiteral, String message) {
+        return fromLiteral
+            ? new CoercingParseLiteralException(message)
+            : new CoercingParseValueException(message);
     }
 
     private static Number normalizeBigInteger(BigInteger value) {
